@@ -21,6 +21,20 @@
   "common.unicast": "unicast",
   "common.list_separator": ", ",
 
+  "metrics.group": "Metrics",
+  "metrics.window": "Metrics window (s)",
+  "metrics.err_window": "Metrics window must be a number from 1 to 3600 seconds.",
+  "metrics.rate": "Data rate",
+  "metrics.rate_value": "{rate} Hz received, {source} Hz at source",
+  "metrics.interval": "Arrival interval",
+  "metrics.interval_value": "{mean} ms avg, ±{std} ms, max {max} ms",
+  "metrics.loss": "Packet loss",
+  "metrics.loss_value": "{missed} frames in the last {window:g}s ({percent:.2f}%)\n{total} since start, {out_of_order} out of order",
+  "metrics.latency_value": "{mean} ms avg, {max} ms max",
+  "metrics.motive_times": "Motive timestamps",
+  "metrics.motive_times_value": "t = {t:.4f} s (frame {frame})\nmid-exposure {mid}, transmit {transmit} ticks",
+  "metrics.motive_t_value": "t = {t:.4f} s (frame {frame})",
+
   "table.id": "ID",
   "table.name": "Name",
   "table.error": "Error (mm)",
@@ -71,6 +85,12 @@
   "bridge.subs_frame": "frame topic {count}",
   "bridge.subs_rigid_body": "rigid body topic {count}",
   "bridge.subs_none": "none matched yet: start DDSTestClientGui.py on domain {domain}",
+  "bridge.metric_motive_latency": "Motive latency\n(mid-exposure → transmit)",
+  "bridge.metric_processing": "Bridge processing\n(received → published)",
+  "bridge.metric_clock": "Motive clock",
+  "bridge.clock_value": "{freq} Hz",
+  "bridge.clock_unknown": "not reported by the server",
+  "bridge.metric_source_ts": "DDS source timestamp\n(packet received)",
 
   "client.title": "DDS Test Client",
   "client.dds_group": "DDS",
@@ -99,5 +119,7 @@
   "client.frame_line": "frame {frame}   t={t:.3f} s   timecode {timecode}.{timecode_sub}",
   "client.recording": "   [RECORDING]",
   "client.frame_counts": "rigid bodies {rigid_bodies}   skeletons {skeletons}   labeled markers {labeled_markers}   marker sets {marker_sets}",
-  "client.skeleton_line": "skeleton {id} {name}: {bones}"
+  "client.skeleton_line": "skeleton {id} {name}: {bones}",
+  "client.metric_latency": "Latency bridge → here\n(needs synced clocks)",
+  "client.metric_source_ts": "DDS source timestamp"
 }

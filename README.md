@@ -21,13 +21,13 @@ Motive ──NatNet (UDP)──> NatNetToDDS.py ──DDS (RTPS)──> DDSTestC
 | File | What it is |
 |---|---|
 | `NatNetToDDS.py` | The bridge. It is based on the SDK's `PythonSample.py` and uses the SDK `NatNetClient`. |
-| `DDSTestClient.py` | A DDS subscriber. It prints the data and reports fps, dropped frames and optional value checks. |
+| `DDSTestClient.py` | A DDS subscriber. It prints the data and reports data rate, packet loss, latency, source timestamps and optional value checks. |
 | `MockNatNetServer.py` | A simulated Motive server (NatNet 4.5) that streams a fixed synthetic scene, so you can test without cameras. |
 | `run_loopback_test.py` | One-command end-to-end test: mock → bridge → DDS → test client. |
 | `NatNetToDDSGui.py` | Window for the bridge: connection settings, status lights for each hop, live rigid body poses, and a button that starts the mock server. |
 | `DDSTestClientGui.py` | Window for the test client: DDS settings, status lights, the latest frame and rigid body poses, and optional mock verification. |
 | `idl/NatNetDDS.idl` | The DDS data model. Use it with `rtiddsgen` to build consumers in other languages. |
-| `natnet_dds/` | DDS type definitions (RTI and Cyclone), a small backend wrapper, and shared GUI and translation code. |
+| `natnet_dds/` | DDS type definitions (RTI and Cyclone), a small backend wrapper, rolling stream metrics (`metrics.py`), and shared GUI and translation code. |
 | `locales/` | GUI translations, one JSON file per language (`en.json`, `zh_CN.json`). |
 | `natnet_sdk/` | `NatNetClient.py`, `MoCapData.py`, `DataDescriptions.py` and `PythonSample.py`, copied unmodified from `NatNetSDK/Samples/PythonClient` (SDK 4.5.1). |
 
@@ -81,7 +81,25 @@ Both implementations use the standard DDS-RTPS wire protocol and the same `@fina
    [dds] frames 242 (120.2 fps)  missed 0  rigid body samples 726  publishers: frame 1, rigid body 1
    ```
 
-   `missed` counts gaps in Motive frame numbers. Run `python DDSTestClient.py --help` for options (`--duration`, `--quiet`, …).
+   `missed` counts gaps in Motive frame numbers. Under it are one metrics line per topic and the latest frame's source timestamps (see [Metrics](#metrics)). Run `python DDSTestClient.py --help` for options (`--duration`, `--quiet`, `--stats-window`, …).
+
+## Metrics
+
+Both programs, and both windows, report the following. Rate, interval, packet loss and latency are computed over a rolling window, 10 s by default (`--stats-window N`, or **Metrics window** in the GUI).
+
+| Metric | Bridge (NatNet input) | Test client (per DDS topic) |
+|---|---|---|
+| **Data rate** | Frames per second arriving from Motive, and the rate according to Motive's own frame timestamps ("at source") | Samples per second arriving over DDS, and the source rate |
+| **Arrival interval** | Mean, standard deviation and max time between frames (jitter) | Same, measured at the client |
+| **Packet loss** | Gaps in Motive frame numbers in the window (with %), since start, and out-of-order frames. Loss here happened between Motive and the bridge. | Same. On `NatNet_RigidBody`, gaps are counted per rigid body, so one lost frame with 3 bodies counts 3. Loss seen here but not on the bridge happened in DDS. |
+| **Latency** | *Motive latency:* camera mid-exposure → Motive transmit, from Motive's hardware clock. *Bridge processing:* NatNet packet received → DDS write finished. | DDS source timestamp → sample taken by the client. It includes up to one 5 ms polling interval of the client, and it is only meaningful when the bridge and client clocks are synchronized (same machine, or NTP/PTP). |
+| **Source timestamps** | Motive's frame timestamp (`t`, seconds since Motive started), the mid-exposure and transmit stamps (ticks), Motive's clock frequency, and the DDS source timestamp | The DDS source timestamp of the latest sample on each topic, and Motive's timestamps carried in the sample |
+
+**DDS source timestamp:** the bridge writes every sample with its DDS source timestamp set to the moment the NatNet packet arrived, as wall-clock UTC. All samples made from one Motive frame (the frame sample and each rigid body) share the same source timestamp. DDS applications read it from `SampleInfo.source_timestamp`. The DDS types themselves are unchanged.
+
+**Motive's clock frequency** comes from the server info Motive sends when the bridge connects. The SDK's Python client skips that field, so the bridge reads it itself. Without it, the Motive latency shows `—`. The hardware stamps are zero when Motive isn't live, for example during playback, and then no Motive latency is shown.
+
+To see the loss reporting work without cameras, make the mock server skip frames: `python MockNatNetServer.py --drop-every 60` drops 1 frame in 60 (1.67%).
 
 ## GUI
 
@@ -103,6 +121,8 @@ Fill in the settings and press **Start**. Each window has four status lights, on
 | 2. Incoming frames: frames are arriving, with their rate | 2. Matched publishers: the bridge was discovered on this domain |
 | 3. DDS publisher: the DDS writers were created | 3. Data flow: samples are arriving, with their rate |
 | 4. DDS subscribers: how many readers matched each topic | 4. Integrity: missed frames, or PASS/FAIL with **Verify against mock** |
+
+Below the lights, a **Metrics** panel shows the [metrics](#metrics) described above. The test client shows one column per topic.
 
 When a light is amber or red, its text suggests what to check, for example the transmission type or the DDS domain. Below the lights, each window shows the live rigid body poses and a log. At the bottom is the equivalent command line, which you can copy into a script.
 

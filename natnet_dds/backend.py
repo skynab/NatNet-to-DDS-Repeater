@@ -47,7 +47,7 @@ class _RtiBackend:
         qos.reliability = dds.Reliability.reliable() if reliable else dds.Reliability.best_effort
         qos.history = dds.History.keep_last(1)
         return _RtiWriter(dds.DataWriter(self.participant.implicit_publisher,
-                                         self._topic(topic_name, data_type), qos))
+                                         self._topic(topic_name, data_type), qos), dds)
 
     def create_reader(self, topic_name, data_type, depth=64, reliable=False):
         dds = self._dds
@@ -62,11 +62,18 @@ class _RtiBackend:
 
 
 class _RtiWriter:
-    def __init__(self, writer):
+    def __init__(self, writer, dds):
         self._w = writer
+        self._dds = dds
 
-    def write(self, sample):
-        self._w.write(sample)
+    def write(self, sample, source_timestamp_ns=None):
+        """Write a sample. source_timestamp_ns (nanoseconds since the UNIX
+        epoch) sets the DDS source timestamp; otherwise DDS uses "now"."""
+        if source_timestamp_ns is None:
+            self._w.write(sample)
+        else:
+            sec, nsec = divmod(int(source_timestamp_ns), 1_000_000_000)
+            self._w.write(sample, self._dds.Time(sec, nsec))
 
     def matched_count(self):
         return len(self._w.matched_subscriptions)
@@ -78,6 +85,15 @@ class _RtiReader:
 
     def take(self):
         return list(self._r.take_data())
+
+    def take_with_info(self):
+        """[(sample, source timestamp in ns since the UNIX epoch)]"""
+        out = []
+        for data, info in self._r.take():
+            if info.valid:
+                ts = info.source_timestamp
+                out.append((data, ts.sec * 1_000_000_000 + ts.nanosec))
+        return out
 
     def matched_count(self):
         return len(self._r.matched_publications)
@@ -127,8 +143,10 @@ class _CycloneWriter:
     def __init__(self, writer):
         self._w = writer
 
-    def write(self, sample):
-        self._w.write(sample)
+    def write(self, sample, source_timestamp_ns=None):
+        """Write a sample. source_timestamp_ns (nanoseconds since the UNIX
+        epoch) sets the DDS source timestamp; otherwise DDS uses "now"."""
+        self._w.write(sample, timestamp=None if source_timestamp_ns is None else int(source_timestamp_ns))
 
     def matched_count(self):
         return len(self._w.get_matched_subscriptions())
@@ -142,6 +160,11 @@ class _CycloneReader:
     def take(self):
         # take() can also return InvalidSample objects (e.g. disposes): skip them.
         return [s for s in self._r.take(N=256) if isinstance(s, self._type)]
+
+    def take_with_info(self):
+        """[(sample, source timestamp in ns since the UNIX epoch)]"""
+        return [(s, s.sample_info.source_timestamp)
+                for s in self._r.take(N=256) if isinstance(s, self._type)]
 
     def matched_count(self):
         return len(self._r.get_matched_publications())

@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.join(HERE, "natnet_sdk"))
 from NatNetClient import NatNetClient  # noqa: E402  (NatNet SDK sample client)
 
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend  # noqa: E402
+from natnet_dds.metrics import DEFAULT_WINDOW_S, StreamStats, fmt, format_utc_ns  # noqa: E402
 
 
 def _to_str(value):
@@ -54,6 +55,9 @@ class BridgeNatNetClient(NatNetClient):
       skeletons. (The stock client only prints them.)
     * Frames are decoded without the stock client's per-frame console
       print, which would otherwise throttle high frame-rate streams.
+    * The arrival time of each packet is recorded (packet_received_ns) and
+      the server's high-resolution clock frequency, which the stock client
+      skips, is read from the server info (clock_frequency).
 
     Everything else (sockets, handshake, version negotiation, unpacking) is
     the unmodified SDK code.
@@ -62,9 +66,13 @@ class BridgeNatNetClient(NatNetClient):
     def __init__(self):
         super().__init__()
         self.data_descriptions_listener = None
+        self.packet_received_ns = None   # wall clock (ns since UNIX epoch) of the packet being processed
+        self.clock_frequency = None      # Motive's high-res clock ticks per second
 
     # Overrides NatNetClient.__process_message (name-mangled private method).
+    # It runs on the SDK's receive thread right after recvfrom().
     def _NatNetClient__process_message(self, data, print_level=0):
+        self.packet_received_ns = time.time_ns()
         message_id = int.from_bytes(data[0:2], byteorder="little", signed=True)
         packet_size = int.from_bytes(data[2:4], byteorder="little", signed=True)
         major, minor = self.get_major(), self.get_minor()
@@ -83,6 +91,17 @@ class BridgeNatNetClient(NatNetClient):
 
         return super()._NatNetClient__process_message(data, print_level)
 
+    # Overrides NatNetClient.__unpack_server_info to also read the
+    # high-resolution clock frequency that follows the version numbers
+    # (sSender_Server: name[256], version[4], NatNet version[4], uint64 freq).
+    def _NatNetClient__unpack_server_info(self, data, packet_size, major, minor):
+        offset = super()._NatNetClient__unpack_server_info(data, packet_size, major, minor)
+        if len(data) >= 272:
+            freq = int.from_bytes(bytes(data[264:272]), byteorder="little", signed=False)
+            if freq > 0:
+                self.clock_frequency = freq
+        return offset
+
     def request_data_descriptions(self):
         self.send_request(self.command_socket, self.NAT_REQUEST_MODELDEF, "",
                           (self.server_ip_address, self.command_port))
@@ -96,7 +115,8 @@ class BridgeNatNetClient(NatNetClient):
 class NatNetToDDSBridge:
     """Converts SDK MoCapData frames to DDS samples and writes them."""
 
-    def __init__(self, backend, publish_frames=True, publish_rigid_bodies=True, reliable=False):
+    def __init__(self, backend, publish_frames=True, publish_rigid_bodies=True, reliable=False,
+                 stats_window_s=DEFAULT_WINDOW_S):
         self.types = backend.types
         self.frame_writer = (backend.create_writer(FRAME_TOPIC, self.types.FrameOfMocapData, reliable)
                              if publish_frames else None)
@@ -116,6 +136,13 @@ class NatNetToDDSBridge:
         self.latest_rigid_bodies = []   # RigidBodyPose list from the last frame
         self.last_error = None
 
+        # Metrics on the NatNet input: rate, frame-number gaps (UDP packets
+        # lost between Motive and the bridge) and Motive's own latency.
+        self.stats = StreamStats(stats_window_s)
+        # Time from receiving the NatNet packet to finishing the DDS writes.
+        self.processing_stats = StreamStats(stats_window_s)
+        self.last_source = None         # SourceTimes of the last frame
+
     # -- NatNet callbacks ------------------------------------------------
 
     def on_data_descriptions(self, descs):
@@ -132,9 +159,13 @@ class NatNetToDDSBridge:
             print("           skeleton   %3d  %s" % (sk_id, name))
         self.descriptions_received.set()
 
-    def on_frame(self, data_dict):
+    def on_frame(self, data_dict, received_ns=None, clock_frequency=None):
+        """received_ns: wall clock time the NatNet packet arrived (ns since
+        the UNIX epoch). It becomes the DDS source timestamp of every sample
+        made from this frame. clock_frequency: Motive's high-res clock ticks
+        per second, used to turn its hardware stamps into a latency."""
         try:
-            self._publish(data_dict["mocap_data"])
+            self._publish(data_dict["mocap_data"], received_ns or time.time_ns(), clock_frequency)
         except Exception as e:  # never let an exception kill the NatNet thread
             self.last_error = repr(e)
 
@@ -150,7 +181,7 @@ class NatNetToDDSBridge:
             mean_error=rb.error,
             tracking_valid=bool(rb.tracking_valid))
 
-    def _publish(self, mocap):
+    def _publish(self, mocap, received_ns, clock_frequency):
         T = self.types
         suffix = mocap.suffix_data
         frame_number = mocap.prefix_data.frame_number
@@ -178,6 +209,10 @@ class NatNetToDDSBridge:
                                    markers=[T.Vector3(*p) for p in ms.marker_pos_list])
                        for ms in mocap.marker_set_data.marker_data_list]
 
+        source = SourceTimes(suffix, received_ns, clock_frequency)
+        self.stats.record(frame_number, source_time_s=float(suffix.timestamp),
+                          latency_s=source.motive_latency_s)
+
         if self.frame_writer:
             self.frame_writer.write(T.FrameOfMocapData(
                 frame_number=frame_number,
@@ -192,7 +227,7 @@ class NatNetToDDSBridge:
                 rigid_bodies=rigid_bodies,
                 skeletons=skeletons,
                 labeled_markers=labeled_markers,
-                marker_sets=marker_sets))
+                marker_sets=marker_sets), received_ns)
 
         if self.rigid_body_writer:
             for p in rigid_bodies:
@@ -200,14 +235,33 @@ class NatNetToDDSBridge:
                     id=p.id, name=p.name, frame_number=frame_number,
                     timestamp=float(suffix.timestamp), position=p.position,
                     orientation=p.orientation, mean_error=p.mean_error,
-                    tracking_valid=p.tracking_valid))
+                    tracking_valid=p.tracking_valid), received_ns)
 
+        self.processing_stats.record(frame_number, latency_s=(time.time_ns() - received_ns) / 1e9)
         self.frames_published += 1
         self.last_frame_number = frame_number
         self.last_frame_time = time.monotonic()
         self.latest_rigid_bodies = rigid_bodies
+        self.last_source = source
         if suffix.tracked_models_changed and self.on_models_changed:
             self.on_models_changed()
+
+
+class SourceTimes:
+    """Timestamps of one frame: Motive's, and when the bridge received it."""
+
+    def __init__(self, suffix, received_ns, clock_frequency):
+        self.motive_timestamp = float(suffix.timestamp)     # seconds since Motive started
+        self.mid_exposure = suffix.stamp_camera_mid_exposure  # Motive high-res clock ticks
+        self.data_received = suffix.stamp_data_received
+        self.transmit = suffix.stamp_transmit
+        self.received_ns = received_ns                      # bridge wall clock = DDS source timestamp
+        self.clock_frequency = clock_frequency
+        # Motive's latency from the middle of the camera exposure until the
+        # frame was sent. Needs the clock frequency and live (non-zero) stamps.
+        self.motive_latency_s = None
+        if clock_frequency and self.mid_exposure > 0 and self.transmit >= self.mid_exposure:
+            self.motive_latency_s = (self.transmit - self.mid_exposure) / clock_frequency
 
 
 def create_natnet_client(bridge, server="127.0.0.1", client_address="127.0.0.1", multicast=True,
@@ -225,7 +279,8 @@ def create_natnet_client(bridge, server="127.0.0.1", client_address="127.0.0.1",
     client.multicast_address = multicast_address
     client.command_port = command_port
     client.data_port = data_port
-    client.new_frame_with_data_listener = bridge.on_frame
+    client.new_frame_with_data_listener = lambda data: bridge.on_frame(
+        data, client.packet_received_ns, client.clock_frequency)
     client.data_descriptions_listener = bridge.on_data_descriptions
 
     # Re-request names when Motive reports the tracked models changed,
@@ -260,8 +315,29 @@ def parse_args():
                    help="use RELIABLE writers (default BEST_EFFORT, typical for streaming sensor data)")
     p.add_argument("--no-frames", action="store_true", help=f"don't publish {FRAME_TOPIC}")
     p.add_argument("--no-rigid-bodies", action="store_true", help=f"don't publish {RIGID_BODY_TOPIC}")
+    p.add_argument("--stats-window", type=float, default=DEFAULT_WINDOW_S,
+                   help="seconds of history used for rate, jitter and packet loss (default %(default)s)")
     p.add_argument("--duration", type=float, default=0, help="exit after N seconds (0 = run until Ctrl+C)")
     return p.parse_args()
+
+
+def format_metrics(st, proc):
+    """One line of input metrics for the console."""
+    return ("rate %s Hz (source %s Hz)  interval %s ms ±%s, max %s  "
+            "missed %d in last %gs (%.2f%%), %d total  Motive latency avg %s / max %s ms  "
+            "bridge processing avg %s / max %s ms" % (
+                fmt(st.rate_hz), fmt(st.source_rate_hz), fmt(st.interval_mean_ms, "%.2f"),
+                fmt(st.interval_std_ms, "%.2f"), fmt(st.interval_max_ms, "%.2f"),
+                st.missed_window, st.window_s, st.loss_percent_window, st.missed_total,
+                fmt(st.latency_mean_ms, "%.2f"), fmt(st.latency_max_ms, "%.2f"),
+                fmt(proc.latency_mean_ms, "%.2f"), fmt(proc.latency_max_ms, "%.2f")))
+
+
+def format_source_times(src):
+    return ("source: Motive t=%.4f s  mid-exposure %d  transmit %d ticks%s  received %s" % (
+        src.motive_timestamp, src.mid_exposure, src.transmit,
+        " @ %d Hz" % src.clock_frequency if src.clock_frequency else "",
+        format_utc_ns(src.received_ns)))
 
 
 def main():
@@ -274,7 +350,7 @@ def main():
         "" if args.no_rigid_bodies else RIGID_BODY_TOPIC))
     bridge = NatNetToDDSBridge(backend, publish_frames=not args.no_frames,
                                publish_rigid_bodies=not args.no_rigid_bodies,
-                               reliable=args.reliable)
+                               reliable=args.reliable, stats_window_s=args.stats_window)
 
     client, request_descriptions = create_natnet_client(
         bridge, args.server, args.client, args.multicast, args.multicast_address,
@@ -300,25 +376,27 @@ def main():
     request_descriptions()
 
     start = time.monotonic()
-    last_count, last_t = bridge.frames_published, start
     try:
         while args.duration <= 0 or time.monotonic() - start < args.duration:
             time.sleep(1.0)
-            now = time.monotonic()
-            count = bridge.frames_published
             subs = []
             if bridge.frame_writer:
                 subs.append("frame subs %d" % bridge.frame_writer.matched_count())
             if bridge.rigid_body_writer:
                 subs.append("rigid body subs %d" % bridge.rigid_body_writer.matched_count())
-            print("[bridge] frame %s  %.1f fps  published %d  %s%s" % (
-                bridge.last_frame_number, (count - last_count) / (now - last_t), count,
-                ", ".join(subs),
+            st = bridge.stats.snapshot()
+            print("[bridge] frame %s  published %d  %s%s" % (
+                bridge.last_frame_number, bridge.frames_published, ", ".join(subs),
                 ("  last error: " + bridge.last_error) if bridge.last_error else ""))
-            last_count, last_t = count, now
+            print("         " + format_metrics(st, bridge.processing_stats.snapshot()))
+            if bridge.last_source:
+                print("         " + format_source_times(bridge.last_source))
     except KeyboardInterrupt:
         pass
     finally:
+        st = bridge.stats.snapshot()
+        print("[bridge] totals: %d frames received from NatNet, %d missed, %d out of order" % (
+            st.received_total, st.missed_total, st.out_of_order_total))
         print("[bridge] shutting down")
         client.shutdown()
         backend.close()

@@ -22,12 +22,14 @@ from tkinter import messagebox, ttk
 
 from DDSTestClient import FlowMonitor, MockVerifier
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
-from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, RigidBodyTable,
-                                   command_line, labeled)
+from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, MetricsPanel,
+                                   RigidBodyTable, command_line, labeled, parse_window, stats_texts)
 from natnet_dds.i18n import load_saved_language, tr
+from natnet_dds.metrics import DEFAULT_WINDOW_S, format_utc_ns
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".natnet_dds_client_gui.json")
-DEFAULTS = {"dds": "auto", "domain": 0, "verify_mock": False, "mock_fps": 120}
+DEFAULTS = {"dds": "auto", "domain": 0, "verify_mock": False, "mock_fps": 120,
+            "stats_window": DEFAULT_WINDOW_S}
 STALE_S = 1.0
 
 
@@ -54,7 +56,7 @@ class ClientSession:
             frame_reader = self.backend.create_reader(FRAME_TOPIC, T.FrameOfMocapData, depth=256)
             rb_reader = self.backend.create_reader(RIGID_BODY_TOPIC, T.RigidBody, depth=64)
             verifier = MockVerifier(c["mock_fps"]) if c["verify_mock"] else None
-            self.monitor = FlowMonitor(frame_reader, rb_reader, verifier)
+            self.monitor = FlowMonitor(frame_reader, rb_reader, verifier, c["stats_window"])
             print("[dds] %s domain %d, subscribed to %s and %s" % (
                 self.backend.name, c["domain"], FRAME_TOPIC, RIGID_BODY_TOPIC))
         except Exception as e:  # noqa: BLE001 - show anything that goes wrong
@@ -93,9 +95,6 @@ class ClientApp:
     def __init__(self, root):
         self.root = root
         self.session = None
-        self.rate_frames = 0
-        self.rate_t = time.monotonic()
-        self.fps = 0.0
         self.failures_shown = 0
         self.top = None
         self._stopping = False   # True between pressing Stop and the readers closing
@@ -112,6 +111,7 @@ class ClientApp:
             "domain": tk.StringVar(value=str(cfg["domain"])),
             "verify_mock": tk.BooleanVar(value=cfg["verify_mock"]),
             "mock_fps": tk.StringVar(value=str(cfg["mock_fps"])),
+            "stats_window": tk.StringVar(value="%g" % cfg["stats_window"]),
         }
         self.cmdline = tk.StringVar()
         self._build()
@@ -146,7 +146,10 @@ class ClientApp:
         self.fps_spin = ttk.Spinbox(vf, from_=1, to=1000, textvariable=self.v["mock_fps"], width=6)
         self.fps_spin.pack(side="left")
         ttk.Label(vf, text=tr("client.verify_hint"), foreground="#666666").pack(side="left", padx=4)
-        self.settings_widgets = (self.dds_combo, self.domain_spin, self.verify_cb, self.fps_spin)
+        self.window_spin = labeled(sf, 2, tr("metrics.window"), ttk.Spinbox(
+            sf, from_=1, to=3600, textvariable=self.v["stats_window"], width=6))
+        self.settings_widgets = (self.dds_combo, self.domain_spin, self.verify_cb, self.fps_spin,
+                                 self.window_spin)
 
         bf = ttk.Frame(top)
         bf.grid(row=1, column=0, sticky="we", **pad)
@@ -167,26 +170,38 @@ class ClientApp:
             lamp.grid(row=0, column=i, sticky="nw", padx=4)
             lamp.set(IDLE, tr("common.stopped"))
 
+        mf = ttk.LabelFrame(top, text=tr("metrics.group"), padding=8)
+        mf.grid(row=3, column=0, sticky="we", **pad)
+        self.metrics = MetricsPanel(mf, [
+            ("rate", tr("metrics.rate")),
+            ("interval", tr("metrics.interval")),
+            ("loss", tr("metrics.loss")),
+            ("latency", tr("client.metric_latency")),
+            ("source_ts", tr("client.metric_source_ts")),
+            ("motive_times", tr("metrics.motive_times")),
+        ], columns=(FRAME_TOPIC, RIGID_BODY_TOPIC))
+        self.metrics.pack(fill="x")
+
         ff = ttk.LabelFrame(top, text=tr("client.latest_frame", topic=FRAME_TOPIC), padding=6)
-        ff.grid(row=3, column=0, sticky="we", **pad)
+        ff.grid(row=4, column=0, sticky="we", **pad)
         self.frame_info = ttk.Label(ff, text="—", font=("TkFixedFont", 10), justify="left")
         self.frame_info.pack(anchor="w")
 
         rf = ttk.LabelFrame(top, text=tr("client.rigid_bodies_group", topic=RIGID_BODY_TOPIC), padding=4)
-        rf.grid(row=4, column=0, sticky="nsew", **pad)
-        top.rowconfigure(4, weight=1)
-        self.table = RigidBodyTable(rf, height=6)
+        rf.grid(row=5, column=0, sticky="nsew", **pad)
+        top.rowconfigure(5, weight=1)
+        self.table = RigidBodyTable(rf, height=5)
         self.table.pack(fill="both", expand=True)
 
         lf = ttk.LabelFrame(top, text=tr("common.log"), padding=4)
-        lf.grid(row=5, column=0, sticky="nsew", **pad)
-        top.rowconfigure(5, weight=1)
-        self.log = LogPane(lf, height=7)
+        lf.grid(row=6, column=0, sticky="nsew", **pad)
+        top.rowconfigure(6, weight=1)
+        self.log = LogPane(lf, height=5)
         self.log.pack(fill="both", expand=True)
         self.log.install()
 
         cf = ttk.Frame(top)
-        cf.grid(row=6, column=0, sticky="we", **pad)
+        cf.grid(row=7, column=0, sticky="we", **pad)
         ttk.Label(cf, text=tr("common.command_line")).pack(side="left")
         ttk.Entry(cf, textvariable=self.cmdline, state="readonly").pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(cf, text=tr("common.copy"), command=self._copy_cmdline).pack(side="left")
@@ -230,12 +245,18 @@ class ClientApp:
                 raise ValueError
         except ValueError:
             raise ValueError(tr("client.err_fps"))
+        cfg["stats_window"] = parse_window(self.v["stats_window"].get())
         return cfg
 
     def _update_cmdline(self):
         args = ["--dds", self.v["dds"].get(), "--domain", self.v["domain"].get()]
         if self.v["verify_mock"].get():
             args += ["--verify-mock", "--mock-fps", self.v["mock_fps"].get()]
+        try:
+            if float(self.v["stats_window"].get()) != DEFAULT_WINDOW_S:
+                args += ["--stats-window", self.v["stats_window"].get()]
+        except ValueError:
+            pass
         self.cmdline.set(command_line("DDSTestClient.py", args))
 
     def _copy_cmdline(self):
@@ -263,7 +284,7 @@ class ClientApp:
             pass
         self.table.clear()
         self.frame_info.configure(text="—")
-        self.rate_frames, self.rate_t, self.fps = 0, time.monotonic(), 0.0
+        self.metrics.clear()
         self.failures_shown = 0
         self.session = ClientSession(cfg)
         self._sync_buttons()
@@ -279,10 +300,12 @@ class ClientApp:
         with s.lock:
             m = s.monitor
             fresh = FlowMonitor(m.frame_reader, m.rb_reader,
-                                MockVerifier(s.cfg["mock_fps"]) if m.verifier else None)
+                                MockVerifier(s.cfg["mock_fps"]) if m.verifier else None,
+                                s.cfg["stats_window"])
             s.monitor = fresh
-        self.rate_frames, self.rate_t, self.failures_shown = 0, time.monotonic(), 0
+        self.failures_shown = 0
         self.table.clear()
+        self.metrics.clear()
         print("[gui] counters reset")
 
     def _on_close(self):
@@ -335,6 +358,9 @@ class ClientApp:
             n_failures = len(v.failures) if v else 0
             named = v.named_frames if v else 0
             frame_text = self._frame_text(f) if f else None
+            frame_stats, rb_stats = m.frame_stats.snapshot(), m.rb_stats.snapshot()
+            frame_source_ns, rb_source_ns = m.latest_frame_source_ns, m.latest_rb_source_ns
+            latest_rb = max(m.latest_rbs.values(), key=lambda r: r.frame_number, default=None)
 
         # 1. participant
         self.lamp_dds.set(OK, tr("common.backend_domain", backend=s.backend.name, domain=c["domain"]))
@@ -351,12 +377,9 @@ class ClientApp:
                 self.lamp_pubs.set(BAD, detail + "\n" + tr("client.no_bridge", domain=c["domain"]))
 
         # 3. flow
-        dt = now - self.rate_t
-        if dt >= 1.0:
-            self.fps = (frames - self.rate_frames) / dt
-            self.rate_frames, self.rate_t = frames, now
+        fps = frame_stats.rate_hz if frames else rb_stats.rate_hz
         if last is not None and now - last < 1.0:
-            self.lamp_flow.set(OK, tr("client.flow_ok", fps=self.fps, frames=frames, rb_samples=rb_samples))
+            self.lamp_flow.set(OK, tr("client.flow_ok", fps=fps or 0.0, frames=frames, rb_samples=rb_samples))
         elif last is not None:
             self.lamp_flow.set(BAD, tr("client.flow_stopped", seconds=now - last, frames=frames))
         elif any(matched):
@@ -386,6 +409,22 @@ class ClientApp:
         if frame_text:
             self.frame_info.configure(text=frame_text)
         self.table.update_rows(rbs, stale_ids=stale)
+
+        # metrics, one column per topic
+        for col, st, received, source_ns in ((0, frame_stats, frames, frame_source_ns),
+                                             (1, rb_stats, rb_samples, rb_source_ns)):
+            if not received:
+                continue
+            texts = stats_texts(st)
+            for key in ("rate", "interval", "loss", "latency"):
+                self.metrics.set(key, texts[key], col)
+            self.metrics.set("source_ts", format_utc_ns(source_ns), col)
+        if f:
+            self.metrics.set("motive_times", tr("metrics.motive_times_value", t=f.timestamp, frame=f.frame_number,
+                                                mid=f.stamp_camera_mid_exposure, transmit=f.stamp_transmit), 0)
+        if latest_rb:
+            self.metrics.set("motive_times", tr("metrics.motive_t_value", t=latest_rb.timestamp,
+                                                frame=latest_rb.frame_number), 1)
 
     @staticmethod
     def _frame_text(f):

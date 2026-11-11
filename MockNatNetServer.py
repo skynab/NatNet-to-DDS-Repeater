@@ -183,9 +183,11 @@ def encode_server_info(multicast_group, data_port):
 # ---------------------------------------------------------------------------
 
 class MockNatNetServer:
-    def __init__(self, bind, command_port, data_port, multicast_group, multicast_if, fps):
-        """multicast_group=None streams unicast to each connected client instead."""
+    def __init__(self, bind, command_port, data_port, multicast_group, multicast_if, fps, drop_every=0):
+        """multicast_group=None streams unicast to each connected client instead.
+        drop_every=N skips sending every Nth frame to simulate packet loss."""
         self.fps = fps
+        self.drop_every = drop_every
         self.data_port = data_port
         self.multicast_group = multicast_group
         self.unicast_clients = set()
@@ -243,13 +245,15 @@ class MockNatNetServer:
             packet = encode_frame(frame, self.fps)
             with self.lock:
                 clients = list(self.unicast_clients)
+            if self.drop_every and frame % self.drop_every == self.drop_every - 1:
+                clients, packet = [], None   # simulated packet loss
             for addr in clients:
                 try:
                     self.cmd.sendto(packet, addr)
                 except OSError:
                     with self.lock:
                         self.unicast_clients.discard(addr)
-            if self.mcast:
+            if self.mcast and packet:
                 self.mcast.sendto(packet, (self.multicast_group, self.data_port))
             frame += 1
             next_t += period
@@ -282,6 +286,8 @@ def main():
     p.add_argument("--multicast-group", default="239.255.42.99")
     p.add_argument("--multicast-interface", default="127.0.0.1", help="interface to send multicast on")
     p.add_argument("--fps", type=float, default=DEFAULT_FPS)
+    p.add_argument("--drop-every", type=int, default=0, metavar="N",
+                   help="don't send every Nth frame, to test packet loss reporting (default 0 = off)")
     args = p.parse_args()
 
     group = None if args.unicast else args.multicast_group
@@ -289,7 +295,7 @@ def main():
         NATNET_VERSION[0], NATNET_VERSION[1], args.bind, args.command_port, args.fps,
         "multicast %s:%d" % (group, args.data_port) if group else "unicast"))
     MockNatNetServer(args.bind, args.command_port, args.data_port, group,
-                     args.multicast_interface, args.fps).run()
+                     args.multicast_interface, args.fps, args.drop_every).run()
 
 
 if __name__ == "__main__":

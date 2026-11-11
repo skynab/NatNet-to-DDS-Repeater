@@ -21,6 +21,20 @@
   "common.unicast": "单播",
   "common.list_separator": "，",
 
+  "metrics.group": "统计指标",
+  "metrics.window": "统计窗口（秒）",
+  "metrics.err_window": "统计窗口必须是 1 到 3600 之间的秒数。",
+  "metrics.rate": "数据频率",
+  "metrics.rate_value": "接收 {rate} Hz，源端 {source} Hz",
+  "metrics.interval": "到达间隔",
+  "metrics.interval_value": "平均 {mean} ms，±{std} ms，最大 {max} ms",
+  "metrics.loss": "丢包",
+  "metrics.loss_value": "最近 {window:g} 秒丢失 {missed} 帧（{percent:.2f}%）\n启动以来共 {total} 帧，乱序 {out_of_order}",
+  "metrics.latency_value": "平均 {mean} ms，最大 {max} ms",
+  "metrics.motive_times": "Motive 时间戳",
+  "metrics.motive_times_value": "t = {t:.4f} 秒（第 {frame} 帧）\n曝光中点 {mid}，发送 {transmit} ticks",
+  "metrics.motive_t_value": "t = {t:.4f} 秒（第 {frame} 帧）",
+
   "table.id": "ID",
   "table.name": "名称",
   "table.error": "误差 (mm)",
@@ -71,6 +85,12 @@
   "bridge.subs_frame": "帧主题 {count}",
   "bridge.subs_rigid_body": "刚体主题 {count}",
   "bridge.subs_none": "尚未匹配：请在域 {domain} 上启动 DDSTestClientGui.py",
+  "bridge.metric_motive_latency": "Motive 延迟\n（曝光中点 → 发送）",
+  "bridge.metric_processing": "桥接处理时间\n（接收 → 发布）",
+  "bridge.metric_clock": "Motive 时钟",
+  "bridge.clock_value": "{freq} Hz",
+  "bridge.clock_unknown": "服务器未提供",
+  "bridge.metric_source_ts": "DDS 源时间戳\n（收到数据包的时间）",
 
   "client.title": "DDS 测试客户端",
   "client.dds_group": "DDS",
@@ -99,5 +119,7 @@
   "client.frame_line": "第 {frame} 帧   t={t:.3f} 秒   时间码 {timecode}.{timecode_sub}",
   "client.recording": "   [录制中]",
   "client.frame_counts": "刚体 {rigid_bodies}   骨骼 {skeletons}   已标识标记点 {labeled_markers}   标记点集 {marker_sets}",
-  "client.skeleton_line": "骨骼 {id} {name}：{bones}"
+  "client.skeleton_line": "骨骼 {id} {name}：{bones}",
+  "client.metric_latency": "桥接 → 本机延迟\n（需要时钟同步）",
+  "client.metric_source_ts": "DDS 源时间戳"
 }

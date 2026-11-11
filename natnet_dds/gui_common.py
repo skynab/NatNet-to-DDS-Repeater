@@ -183,6 +183,39 @@ class RigidBodyTable(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
 
 
+class MetricsPanel(ttk.Frame):
+    """Grid of metric rows: a title column plus one value column per stream.
+
+    rows: [(row key, title)], columns: optional column headings."""
+
+    def __init__(self, master, rows, columns=None):
+        super().__init__(master)
+        self._values = {}
+        n_cols = len(columns) if columns else 1
+        first = 0
+        if columns:
+            for c, heading in enumerate(columns):
+                ttk.Label(self, text=heading, font=("TkDefaultFont", 0, "bold")).grid(
+                    row=0, column=1 + c, sticky="w", padx=(0, 16))
+            first = 1
+        for r, (key, title) in enumerate(rows):
+            ttk.Label(self, text=title, foreground="#555555").grid(
+                row=first + r, column=0, sticky="nw", padx=(0, 12), pady=1)
+            for c in range(n_cols):
+                lbl = ttk.Label(self, text="—", justify="left")
+                lbl.grid(row=first + r, column=1 + c, sticky="nw", padx=(0, 16), pady=1)
+                self._values[(key, c)] = lbl
+        for c in range(n_cols):
+            self.columnconfigure(1 + c, weight=1, uniform="metric")
+
+    def set(self, key, text, column=0):
+        self._values[(key, column)].configure(text=text)
+
+    def clear(self):
+        for lbl in self._values.values():
+            lbl.configure(text="—")
+
+
 class LanguagePicker(ttk.Frame):
     """Language menu. Each language is listed by its own name, so it can be
     found whatever language the window is in. Calls on_change(code)."""
@@ -219,3 +252,29 @@ def command_line(script, args):
     for a in args:
         parts.append('"%s"' % a if " " in a else a)
     return " ".join(parts)
+
+
+def stats_texts(st):
+    """Translated value strings for a natnet_dds.metrics.Snapshot."""
+    from .metrics import fmt
+    return {
+        "rate": tr("metrics.rate_value", rate=fmt(st.rate_hz), source=fmt(st.source_rate_hz)),
+        "interval": tr("metrics.interval_value", mean=fmt(st.interval_mean_ms, "%.2f"),
+                       std=fmt(st.interval_std_ms, "%.2f"), max=fmt(st.interval_max_ms, "%.2f")),
+        "loss": tr("metrics.loss_value", missed=st.missed_window, window=st.window_s,
+                   percent=st.loss_percent_window, total=st.missed_total,
+                   out_of_order=st.out_of_order_total),
+        "latency": tr("metrics.latency_value", mean=fmt(st.latency_mean_ms, "%.2f"),
+                      max=fmt(st.latency_max_ms, "%.2f")),
+    }
+
+
+def parse_window(text):
+    """Validate the metrics window setting (seconds). Raises ValueError."""
+    try:
+        value = float(text)
+        if not 1 <= value <= 3600:
+            raise ValueError
+    except ValueError:
+        raise ValueError(tr("metrics.err_window"))
+    return value

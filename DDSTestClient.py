@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """DDS test client for the NatNet -> DDS bridge.
 
-Subscribes to the bridge's topics, prints what arrives, and reports frame
-rate and dropped frames (gaps in Motive frame numbers):
+Subscribes to the bridge's topics, prints what arrives, and reports the
+data rate, dropped frames (gaps in Motive frame numbers) over a rolling
+window, and the source timestamps of the data:
 
   Topic "NatNet_FrameOfMocapData"  type NatNet::FrameOfMocapData
   Topic "NatNet_RigidBody"         type NatNet::RigidBody
@@ -10,6 +11,11 @@ rate and dropped frames (gaps in Motive frame numbers):
 With --verify-mock (when the bridge is fed by MockNatNetServer.py) every
 received value is checked against the mock's known trajectories, so a pass
 means the data made it NatNet -> bridge -> DDS -> here unchanged.
+
+Latency is measured from the DDS source timestamp (set by the bridge to the
+time it received the NatNet packet) to the time the sample is taken here. It
+is only meaningful when both machines' clocks are synchronized (same machine,
+or NTP/PTP).
 
 Exit code is 0 if data was received (and verification passed), else 1,
 so it can be used in automated tests with --duration.
@@ -24,6 +30,7 @@ import sys
 import time
 
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
+from natnet_dds.metrics import DEFAULT_WINDOW_S, StreamStats, fmt, format_utc_ns
 
 
 def _v3(v):
@@ -114,21 +121,32 @@ class MockVerifier:
 class FlowMonitor:
     """Takes samples from both readers and keeps the flow statistics."""
 
-    def __init__(self, frame_reader, rb_reader, verifier=None):
+    def __init__(self, frame_reader, rb_reader, verifier=None, stats_window_s=DEFAULT_WINDOW_S):
         self.frame_reader = frame_reader
         self.rb_reader = rb_reader
         self.verifier = verifier
         self.frames = self.rb_samples = self.missed = self.out_of_order = 0
         self.last_frame_number = None
         self.latest_frame = None
+        self.latest_frame_source_ns = None   # DDS source timestamp of latest_frame
         self.latest_rbs = {}            # rigid body id -> latest NatNet::RigidBody
+        self.latest_rb_source_ns = None  # DDS source timestamp of the latest rigid body sample
         self.rb_last_seen = {}          # rigid body id -> time.monotonic() of its last sample
         self.last_sample_time = None    # time.monotonic() of the last sample
+        # Rolling metrics per topic. Rigid body gaps are counted per body id.
+        self.frame_stats = StreamStats(stats_window_s)
+        self.rb_stats = StreamStats(stats_window_s)
+
+    @staticmethod
+    def _latency_s(source_ns, now_ns):
+        return (now_ns - source_ns) / 1e9 if source_ns else None
 
     def poll(self):
         """Take every available sample. Returns the number taken."""
         taken = 0
-        for f in self.frame_reader.take():
+        frames = self.frame_reader.take_with_info()
+        now_ns = time.time_ns()
+        for f, source_ns in frames:
             taken += 1
             self.frames += 1
             if self.last_frame_number is not None:
@@ -138,15 +156,23 @@ class FlowMonitor:
                     self.out_of_order += 1   # also happens when Motive playback loops
             self.last_frame_number = f.frame_number
             self.latest_frame = f
+            self.latest_frame_source_ns = source_ns
+            self.frame_stats.record(f.frame_number, source_time_s=f.timestamp,
+                                    latency_s=self._latency_s(source_ns, now_ns))
             if self.verifier:
                 self.verifier.frame(f)
 
         now = time.monotonic()
-        for rb in self.rb_reader.take():
+        rbs = self.rb_reader.take_with_info()
+        now_ns = time.time_ns()
+        for rb, source_ns in rbs:
             taken += 1
             self.rb_last_seen[rb.id] = now
             self.rb_samples += 1
             self.latest_rbs[rb.id] = rb
+            self.latest_rb_source_ns = source_ns
+            self.rb_stats.record(rb.frame_number, key=rb.id, source_time_s=rb.timestamp,
+                                 latency_s=self._latency_s(source_ns, now_ns))
             if self.verifier:
                 self.verifier.rigid_body(rb)
 
@@ -165,10 +191,22 @@ class FlowMonitor:
         return ok
 
 
-def print_frame(f, rigid_bodies):
+def format_metrics(name, st):
+    """One line of metrics for one topic."""
+    return ("%s: rate %s Hz (source %s Hz)  interval %s ms ±%s, max %s  missed %d in last %gs (%.2f%%), "
+            "%d total  latency avg %s / max %s ms" % (
+                name, fmt(st.rate_hz), fmt(st.source_rate_hz), fmt(st.interval_mean_ms, "%.2f"),
+                fmt(st.interval_std_ms, "%.2f"), fmt(st.interval_max_ms, "%.2f"),
+                st.missed_window, st.window_s, st.loss_percent_window, st.missed_total,
+                fmt(st.latency_mean_ms, "%.2f"), fmt(st.latency_max_ms, "%.2f")))
+
+
+def print_frame(f, rigid_bodies, source_ns=None):
     print("    frame %d  t=%.3fs  rigid bodies %d  skeletons %d  labeled markers %d  marker sets %d%s" % (
         f.frame_number, f.timestamp, len(f.rigid_bodies), len(f.skeletons),
         len(f.labeled_markers), len(f.marker_sets), "  [recording]" if f.is_recording else ""))
+    print("    source: Motive t=%.4f s  mid-exposure %d  transmit %d ticks  DDS source timestamp %s" % (
+        f.timestamp, f.stamp_camera_mid_exposure, f.stamp_transmit, format_utc_ns(source_ns)))
     for rb in sorted(rigid_bodies.values(), key=lambda r: r.id):
         print("    rb %3d %-12s pos (% .4f, % .4f, % .4f)  quat (% .4f, % .4f, % .4f, % .4f)  %s" % (
             rb.id, rb.name or "?", rb.position.x, rb.position.y, rb.position.z,
@@ -188,6 +226,8 @@ def main():
     p.add_argument("--verify-mock", action="store_true",
                    help="check every value against MockNatNetServer.py's synthetic scene")
     p.add_argument("--mock-fps", type=float, default=120.0, help="--fps the mock server was started with")
+    p.add_argument("--stats-window", type=float, default=DEFAULT_WINDOW_S,
+                   help="seconds of history used for rate, jitter, packet loss and latency (default %(default)s)")
     args = p.parse_args()
 
     backend = create_backend(args.dds, args.domain)
@@ -198,24 +238,28 @@ def main():
     print("[dds] %s domain %d, subscribed to %s and %s" % (
         backend.name, args.domain, FRAME_TOPIC, RIGID_BODY_TOPIC))
 
-    mon = FlowMonitor(frame_reader, rb_reader, verifier)
+    mon = FlowMonitor(frame_reader, rb_reader, verifier, args.stats_window)
 
     start = time.monotonic()
-    last_report, frames_at_report = start, 0
+    last_report = start
     try:
         while args.duration <= 0 or time.monotonic() - start < args.duration:
             mon.poll()
             now = time.monotonic()
             if now - last_report >= 1.0:
-                fps = (mon.frames - frames_at_report) / (now - last_report)
+                fps = mon.frame_stats.snapshot().rate_hz or 0.0
                 line = "[dds] frames %d (%.1f fps)  missed %d  rigid body samples %d  publishers: frame %d, rigid body %d" % (
                     (mon.frames, fps, mon.missed, mon.rb_samples) + mon.matched_publishers())
                 if verifier:
                     line += "  verify: %d checks, %d failures" % (verifier.checks, len(verifier.failures))
                 print(line)
+                if mon.frames:
+                    print("      " + format_metrics("frame topic", mon.frame_stats.snapshot()))
+                if mon.rb_samples:
+                    print("      " + format_metrics("rigid body topic", mon.rb_stats.snapshot()))
                 if mon.latest_frame and not args.quiet:
-                    print_frame(mon.latest_frame, mon.latest_rbs)
-                last_report, frames_at_report = now, mon.frames
+                    print_frame(mon.latest_frame, mon.latest_rbs, mon.latest_frame_source_ns)
+                last_report = now
             time.sleep(0.005)
     except KeyboardInterrupt:
         pass
@@ -225,6 +269,8 @@ def main():
     print("missed frames (gaps)   : %d" % mon.missed)
     print("out-of-order / restarts: %d" % mon.out_of_order)
     print("rigid body samples     : %d (%d bodies)" % (mon.rb_samples, len(mon.latest_rbs)))
+    print("rigid body gaps        : %d missed, %d out of order" % (
+        mon.rb_stats.missed_total, mon.rb_stats.out_of_order_total))
     if not (mon.frames or mon.rb_samples):
         print("FAIL: no data received. Is NatNetToDDS.py running on the same DDS domain?")
     if verifier:

@@ -23,9 +23,11 @@ from tkinter import messagebox, ttk
 
 import NatNetToDDS as nn
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
-from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, RigidBodyTable,
-                                   command_line, labeled, local_ipv4_addresses)
+from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, MetricsPanel,
+                                   RigidBodyTable, command_line, labeled, local_ipv4_addresses, parse_window,
+                                   stats_texts)
 from natnet_dds.i18n import load_saved_language, tr
+from natnet_dds.metrics import DEFAULT_WINDOW_S, format_utc_ns
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".natnet_dds_bridge_gui.json")
@@ -35,6 +37,7 @@ DEFAULTS = {
     "multicast_address": "239.255.42.99", "command_port": 1510, "data_port": 1511,
     "dds": "auto", "domain": 0, "reliable": False,
     "publish_frames": True, "publish_rigid_bodies": True, "mock_fps": 120,
+    "stats_window": DEFAULT_WINDOW_S,
 }
 
 
@@ -63,7 +66,8 @@ class BridgeSession:
             self.backend = create_backend(c["dds"], c["domain"])
             print("[dds] using %s, domain %d" % (self.backend.name, c["domain"]))
             self.bridge = nn.NatNetToDDSBridge(self.backend, c["publish_frames"],
-                                               c["publish_rigid_bodies"], c["reliable"])
+                                               c["publish_rigid_bodies"], c["reliable"],
+                                               stats_window_s=c["stats_window"])
             client, self._request_descriptions = nn.create_natnet_client(
                 self.bridge, c["server"], c["client"], c["multicast"], c["multicast_address"],
                 c["command_port"], c["data_port"])
@@ -157,9 +161,6 @@ class BridgeApp:
         self.root = root
         self.session = None
         self.mock = None
-        self.last_count = 0
-        self.last_rate_t = time.monotonic()
-        self.fps = 0.0
         self.last_error_shown = None
         self.top = None
         root.minsize(760, 640)
@@ -184,6 +185,7 @@ class BridgeApp:
             "publish_frames": tk.BooleanVar(value=cfg["publish_frames"]),
             "publish_rigid_bodies": tk.BooleanVar(value=cfg["publish_rigid_bodies"]),
             "mock_fps": tk.StringVar(value=str(cfg["mock_fps"])),
+            "stats_window": tk.StringVar(value="%g" % cfg["stats_window"]),
         }
         self.cmdline = tk.StringVar()
         self._build()
@@ -251,6 +253,9 @@ class BridgeApp:
             cb = ttk.Checkbutton(df, text=text, variable=self.v[key])
             cb.grid(row=2 + i, column=0, columnspan=2, sticky="w", pady=1)
             self.settings_widgets.append(cb)
+        w = labeled(df, 5, tr("metrics.window"),
+                    ttk.Spinbox(df, from_=1, to=3600, textvariable=self.v["stats_window"], width=6))
+        self.settings_widgets.append(w)
 
         # Buttons + language
         bf = ttk.Frame(top)
@@ -278,23 +283,38 @@ class BridgeApp:
             lamp.grid(row=0, column=i, sticky="nw", padx=4)
             lamp.set(IDLE, tr("common.stopped"))
 
+        # Metrics (NatNet input)
+        mf = ttk.LabelFrame(top, text=tr("metrics.group"), padding=8)
+        mf.grid(row=3, column=0, columnspan=2, sticky="we", **pad)
+        self.metrics = MetricsPanel(mf, [
+            ("rate", tr("metrics.rate")),
+            ("interval", tr("metrics.interval")),
+            ("loss", tr("metrics.loss")),
+            ("motive_latency", tr("bridge.metric_motive_latency")),
+            ("processing", tr("bridge.metric_processing")),
+            ("motive_times", tr("metrics.motive_times")),
+            ("clock", tr("bridge.metric_clock")),
+            ("source_ts", tr("bridge.metric_source_ts")),
+        ])
+        self.metrics.pack(fill="x")
+
         # Rigid bodies
         rf = ttk.LabelFrame(top, text=tr("bridge.rigid_bodies_group"), padding=4)
-        rf.grid(row=3, column=0, columnspan=2, sticky="nsew", **pad)
-        top.rowconfigure(3, weight=1)
+        rf.grid(row=4, column=0, columnspan=2, sticky="nsew", **pad)
+        top.rowconfigure(4, weight=1)
         self.table = RigidBodyTable(rf, height=6)
         self.table.pack(fill="both", expand=True)
 
         # Log + command line
         lf = ttk.LabelFrame(top, text=tr("common.log"), padding=4)
-        lf.grid(row=4, column=0, columnspan=2, sticky="nsew", **pad)
-        top.rowconfigure(4, weight=1)
-        self.log = LogPane(lf, height=8)
+        lf.grid(row=5, column=0, columnspan=2, sticky="nsew", **pad)
+        top.rowconfigure(5, weight=1)
+        self.log = LogPane(lf, height=6)
         self.log.pack(fill="both", expand=True)
         self.log.install()
 
         cf = ttk.Frame(top)
-        cf.grid(row=5, column=0, columnspan=2, sticky="we", **pad)
+        cf.grid(row=6, column=0, columnspan=2, sticky="we", **pad)
         ttk.Label(cf, text=tr("common.command_line")).pack(side="left")
         ttk.Entry(cf, textvariable=self.cmdline, state="readonly").pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(cf, text=tr("common.copy"), command=self._copy_cmdline).pack(side="left")
@@ -354,6 +374,7 @@ class BridgeApp:
         cfg["dds"] = self.v["dds"].get()
         if not (cfg["publish_frames"] or cfg["publish_rigid_bodies"]):
             raise ValueError(tr("bridge.err_no_topic"))
+        cfg["stats_window"] = parse_window(self.v["stats_window"].get())
         try:
             cfg["mock_fps"] = max(1, int(float(self.v["mock_fps"].get())))
         except ValueError:
@@ -385,6 +406,11 @@ class BridgeApp:
             args.append("--no-frames")
         if not g["publish_rigid_bodies"].get():
             args.append("--no-rigid-bodies")
+        try:
+            if float(g["stats_window"].get()) != DEFAULT_WINDOW_S:
+                args += ["--stats-window", g["stats_window"].get()]
+        except ValueError:
+            pass
         self.cmdline.set(command_line("NatNetToDDS.py", args))
 
     def _copy_cmdline(self):
@@ -415,7 +441,7 @@ class BridgeApp:
             return
         self._save_settings(cfg)
         self.table.clear()
-        self.last_count, self.last_rate_t, self.fps = 0, time.monotonic(), 0.0
+        self.metrics.clear()
         self.last_error_shown = None
         self.session = BridgeSession(cfg)
         self._sync_buttons()
@@ -510,13 +536,11 @@ class BridgeApp:
 
         # 2. Incoming frames
         if b:
-            dt = now - self.last_rate_t
-            if dt >= 1.0:
-                self.fps = (b.frames_published - self.last_count) / dt
-                self.last_count, self.last_rate_t = b.frames_published, now
+            st = b.stats.snapshot()
+            self._show_metrics(b, st)
             age = (now - b.last_frame_time) if b.last_frame_time else None
             if age is not None and age < 1.0:
-                self.lamp_frames.set(OK, tr("bridge.frames_ok", fps=self.fps, frame=b.last_frame_number,
+                self.lamp_frames.set(OK, tr("bridge.frames_ok", fps=st.rate_hz or 0.0, frame=b.last_frame_number,
                                             published=b.frames_published))
             elif age is not None:
                 self.lamp_frames.set(BAD, tr("bridge.frames_stopped", seconds=age, frame=b.last_frame_number))
@@ -545,6 +569,22 @@ class BridgeApp:
             self.table.update_rows(b.latest_rigid_bodies)
         else:
             self.lamp_subs.set(IDLE, "")
+
+    def _show_metrics(self, b, st):
+        m = self.metrics
+        texts = stats_texts(st)
+        for key in ("rate", "interval", "loss"):
+            m.set(key, texts[key])
+        m.set("motive_latency", texts["latency"])
+        m.set("processing", stats_texts(b.processing_stats.snapshot())["latency"])
+        src = b.last_source
+        if src:
+            m.set("motive_times", tr("metrics.motive_times_value", t=src.motive_timestamp,
+                                     frame=b.last_frame_number, mid=src.mid_exposure,
+                                     transmit=src.transmit))
+            m.set("clock", tr("bridge.clock_value", freq=src.clock_frequency) if src.clock_frequency
+                  else tr("bridge.clock_unknown"))
+            m.set("source_ts", format_utc_ns(src.received_ns))
 
 
 def main():
