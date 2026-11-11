@@ -2,6 +2,13 @@
 
 A Python sample that receives OptiTrack Motive data with the NatNet SDK 4.5 Python client and republishes it on DDS ([RTI Connext DDS](https://www.rti.com/products/dds-standard) or any other DDS-RTPS implementation). It comes with a DDS test client that checks the data arrives intact. Everything is plain Python, so it runs on Windows, macOS and Linux.
 
+Bridge
+<img width="810" height="754" alt="image" src="https://github.com/user-attachments/assets/a0da84d8-5e5f-4bc5-8c22-ddd11291acbe" />
+
+Client
+![Uploading image.png…]()
+
+
 ```
 Motive ──NatNet (UDP)──> NatNetToDDS.py ──DDS (RTPS)──> DDSTestClient.py
                                                   └──> any DDS app (C++, Java, ROS 2, …)
