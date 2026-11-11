@@ -18,7 +18,8 @@ Motive ──NatNet (UDP)──> NatNetToDDS.py ──DDS (RTPS)──> DDSTestC
 | `NatNetToDDSGui.py` | Window for the bridge: connection settings, status lights for each hop, live rigid body poses, and a button that starts the mock server. |
 | `DDSTestClientGui.py` | Window for the test client: DDS settings, status lights, the latest frame and rigid body poses, and optional mock verification. |
 | `idl/NatNetDDS.idl` | The DDS data model. Use it with `rtiddsgen` to build consumers in other languages. |
-| `natnet_dds/` | DDS type definitions (RTI and Cyclone) and a small backend wrapper. |
+| `natnet_dds/` | DDS type definitions (RTI and Cyclone), a small backend wrapper, and shared GUI and translation code. |
+| `locales/` | GUI translations, one JSON file per language (`en.json`, `zh_CN.json`). |
 | `natnet_sdk/` | `NatNetClient.py`, `MoCapData.py`, `DataDescriptions.py` and `PythonSample.py`, copied unmodified from `NatNetSDK/Samples/PythonClient` (SDK 4.5.1). |
 
 ## Setup
@@ -95,6 +96,8 @@ Fill in the settings and press **Start**. Each window has four status lights, on
 | 4. DDS subscribers: how many readers matched each topic | 4. Integrity: missed frames, or PASS/FAIL with **Verify against mock** |
 
 When a light is amber or red, its text suggests what to check, for example the transmission type or the DDS domain. Below the lights, each window shows the live rigid body poses and a log. At the bottom is the equivalent command line, which you can copy into a script.
+
+**Language:** use the **Language** menu at the top right of either window to switch between English and 简体中文. The window updates right away, even while it is running, and both windows remember the choice. The text comes from JSON files in [locales/](locales/). See [locales/README.md](locales/README.md) to edit a translation or add a language.
 
 To try the GUI without cameras, set the bridge's server and local interface to `127.0.0.1` and press **Start mock Motive**, then **Start bridge**. In the test client, tick **Verify against mock**. Each window remembers its last settings in your home folder (`.natnet_dds_bridge_gui.json` and `.natnet_dds_client_gui.json`).
 

@@ -9,6 +9,8 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
+from .i18n import available_languages, current_language, save_language, tr
+
 # Status lamp colors
 OK, WARN, BAD, IDLE = "#2ecc40", "#ffb000", "#e5383b", "#9a9a9a"
 
@@ -72,10 +74,26 @@ class LogPane(ttk.Frame):
                                  font=("TkFixedFont", 10))
         self.text.pack(fill="both", expand=True)
         self._queue = queue.Queue()
-        self.after(100, self._drain)
+        self._after_id = self.after(100, self._drain)
 
     def write(self, msg):
         self._queue.put(msg)
+
+    def get_text(self):
+        """Everything logged so far, including messages not yet shown."""
+        self._drain(reschedule=False)
+        return self.text.get("1.0", "end-1c")
+
+    def set_text(self, text):
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("end", text)
+        self.text.see("end")
+        self.text.configure(state="disabled")
+
+    def destroy(self):
+        self.after_cancel(self._after_id)
+        super().destroy()
 
     def install(self):
         pane = self
@@ -102,7 +120,7 @@ class LogPane(ttk.Frame):
         sys.stdout = _Tee(sys.__stdout__)
         sys.stderr = _Tee(sys.__stderr__)
 
-    def _drain(self):
+    def _drain(self, reschedule=True):
         chunks = []
         try:
             while True:
@@ -117,21 +135,23 @@ class LogPane(ttk.Frame):
                 self.text.delete("1.0", "%d.0" % (lines - self.MAX_LINES))
             self.text.see("end")
             self.text.configure(state="disabled")
-        self.after(100, self._drain)
+        if reschedule:
+            self._after_id = self.after(100, self._drain)
 
 
 class RigidBodyTable(ttk.Frame):
     """Treeview listing rigid body poses, one row per id."""
 
-    COLUMNS = (("id", "ID", 40), ("name", "Name", 110), ("x", "X", 70), ("y", "Y", 70), ("z", "Z", 70),
-               ("qx", "qx", 64), ("qy", "qy", 64), ("qz", "qz", 64), ("qw", "qw", 64),
-               ("err", "Error (mm)", 76), ("state", "Tracking", 76))
+    # (column, title or translation id, width)
+    COLUMNS = (("id", "table.id", 40), ("name", "table.name", 110), ("x", "X", 70), ("y", "Y", 70),
+               ("z", "Z", 70), ("qx", "qx", 64), ("qy", "qy", 64), ("qz", "qz", 64), ("qw", "qw", 64),
+               ("err", "table.error", 76), ("state", "table.tracking", 76))
 
     def __init__(self, master, height=6):
         super().__init__(master)
         self.tree = ttk.Treeview(self, columns=[c[0] for c in self.COLUMNS], show="headings", height=height)
         for key, title, width in self.COLUMNS:
-            self.tree.heading(key, text=title)
+            self.tree.heading(key, text=tr(title) if title.startswith("table.") else title)
             self.tree.column(key, width=width, anchor="w" if key == "name" else "e", stretch=key == "name")
         self.tree.tag_configure("lost", foreground=BAD)
         self.tree.tag_configure("stale", foreground=IDLE)
@@ -149,7 +169,7 @@ class RigidBodyTable(ttk.Frame):
             values = (rb.id, rb.name or "?", "%.4f" % p.x, "%.4f" % p.y, "%.4f" % p.z,
                       "%.4f" % q.x, "%.4f" % q.y, "%.4f" % q.z, "%.4f" % q.w,
                       "%.2f" % (rb.mean_error * 1000.0),
-                      "stale" if stale else ("tracked" if rb.tracking_valid else "LOST"))
+                      tr("table.stale") if stale else tr("table.tracked" if rb.tracking_valid else "table.lost"))
             tags = ("stale",) if stale else (() if rb.tracking_valid else ("lost",))
             if self.tree.exists(iid):
                 self.tree.item(iid, values=values, tags=tags)
@@ -161,6 +181,29 @@ class RigidBodyTable(ttk.Frame):
 
     def clear(self):
         self.tree.delete(*self.tree.get_children())
+
+
+class LanguagePicker(ttk.Frame):
+    """Language menu. Each language is listed by its own name, so it can be
+    found whatever language the window is in. Calls on_change(code)."""
+
+    def __init__(self, master, on_change):
+        super().__init__(master)
+        self._langs = available_languages()
+        names = [name for _, name in self._langs]
+        current = dict(self._langs).get(current_language(), names[0] if names else "")
+        self._var = tk.StringVar(value=current)
+        ttk.Label(self, text=tr("common.language")).pack(side="left", padx=(0, 4))
+        box = ttk.Combobox(self, textvariable=self._var, values=names, state="readonly",
+                           width=max([8] + [len(n) + 2 for n in names]))
+        box.pack(side="left")
+        box.bind("<<ComboboxSelected>>", lambda _e: self._picked(on_change))
+
+    def _picked(self, on_change):
+        code = {name: c for c, name in self._langs}.get(self._var.get())
+        if code and code != current_language():
+            save_language(code)
+            on_change(code)
 
 
 def labeled(parent, row, text, widget, column=0, **grid):

@@ -22,8 +22,9 @@ from tkinter import messagebox, ttk
 
 from DDSTestClient import FlowMonitor, MockVerifier
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
-from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, Lamp, LogPane, RigidBodyTable,
+from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, RigidBodyTable,
                                    command_line, labeled)
+from natnet_dds.i18n import load_saved_language, tr
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".natnet_dds_client_gui.json")
 DEFAULTS = {"dds": "auto", "domain": 0, "verify_mock": False, "mock_fps": 120}
@@ -96,7 +97,8 @@ class ClientApp:
         self.rate_t = time.monotonic()
         self.fps = 0.0
         self.failures_shown = 0
-        root.title("DDS Test Client")
+        self.top = None
+        self._stopping = False   # True between pressing Stop and the readers closing
         root.minsize(760, 600)
 
         cfg = dict(DEFAULTS)
@@ -111,6 +113,7 @@ class ClientApp:
             "verify_mock": tk.BooleanVar(value=cfg["verify_mock"]),
             "mock_fps": tk.StringVar(value=str(cfg["mock_fps"])),
         }
+        self.cmdline = tk.StringVar()
         self._build()
         for var in self.v.values():
             var.trace_add("write", lambda *_: self._update_cmdline())
@@ -121,58 +124,61 @@ class ClientApp:
     # -- layout ---------------------------------------------------------------
 
     def _build(self):
+        """Create every widget in the current language. Called again on a
+        language change; settings live in self.v, so they survive."""
+        self.root.title(tr("client.title"))
         pad = {"padx": 8, "pady": 4}
-        top = ttk.Frame(self.root, padding=8)
+        top = self.top = ttk.Frame(self.root, padding=8)
         top.pack(fill="both", expand=True)
         top.columnconfigure(0, weight=1)
 
-        sf = ttk.LabelFrame(top, text="DDS", padding=8)
+        sf = ttk.LabelFrame(top, text=tr("client.dds_group"), padding=8)
         sf.grid(row=0, column=0, sticky="we", **pad)
-        self.dds_combo = labeled(sf, 0, "Implementation", ttk.Combobox(
+        self.dds_combo = labeled(sf, 0, tr("common.implementation"), ttk.Combobox(
             sf, textvariable=self.v["dds"], state="readonly", values=("auto", "rti", "cyclone"), width=10))
-        self.domain_spin = labeled(sf, 0, "Domain ID", ttk.Spinbox(
+        self.domain_spin = labeled(sf, 0, tr("common.domain_id"), ttk.Spinbox(
             sf, from_=0, to=232, textvariable=self.v["domain"], width=6), column=2, padx=(0, 16))
         sf.columnconfigure(1, pad=16)
-        self.verify_cb = ttk.Checkbutton(sf, text="Verify against mock server at", variable=self.v["verify_mock"])
+        self.verify_cb = ttk.Checkbutton(sf, text=tr("client.verify"), variable=self.v["verify_mock"])
         self.verify_cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
         vf = ttk.Frame(sf)
         vf.grid(row=1, column=2, columnspan=2, sticky="w")
         self.fps_spin = ttk.Spinbox(vf, from_=1, to=1000, textvariable=self.v["mock_fps"], width=6)
         self.fps_spin.pack(side="left")
-        ttk.Label(vf, text="fps (only when the bridge is fed by MockNatNetServer.py)",
-                  foreground="#666666").pack(side="left", padx=4)
+        ttk.Label(vf, text=tr("client.verify_hint"), foreground="#666666").pack(side="left", padx=4)
         self.settings_widgets = (self.dds_combo, self.domain_spin, self.verify_cb, self.fps_spin)
 
         bf = ttk.Frame(top)
         bf.grid(row=1, column=0, sticky="we", **pad)
-        self.start_btn = ttk.Button(bf, text="Start listening", command=self._toggle)
+        self.start_btn = ttk.Button(bf, command=self._toggle)
         self.start_btn.pack(side="left")
-        ttk.Button(bf, text="Reset counters", command=self._reset).pack(side="left", padx=8)
+        ttk.Button(bf, text=tr("client.reset"), command=self._reset).pack(side="left", padx=8)
+        LanguagePicker(bf, self._on_language).pack(side="right")
 
-        stf = ttk.LabelFrame(top, text="Status", padding=8)
+        stf = ttk.LabelFrame(top, text=tr("common.status"), padding=8)
         stf.grid(row=2, column=0, sticky="we", **pad)
         for i in range(4):
             stf.columnconfigure(i, weight=1, uniform="lamp")
-        self.lamp_dds = Lamp(stf, "1. DDS participant")
-        self.lamp_pubs = Lamp(stf, "2. Matched publishers")
-        self.lamp_flow = Lamp(stf, "3. Data flow")
-        self.lamp_check = Lamp(stf, "4. Integrity")
+        self.lamp_dds = Lamp(stf, tr("client.lamp_dds"))
+        self.lamp_pubs = Lamp(stf, tr("client.lamp_pubs"))
+        self.lamp_flow = Lamp(stf, tr("client.lamp_flow"))
+        self.lamp_check = Lamp(stf, tr("client.lamp_check"))
         for i, lamp in enumerate((self.lamp_dds, self.lamp_pubs, self.lamp_flow, self.lamp_check)):
             lamp.grid(row=0, column=i, sticky="nw", padx=4)
-            lamp.set(IDLE, "stopped")
+            lamp.set(IDLE, tr("common.stopped"))
 
-        ff = ttk.LabelFrame(top, text="Latest " + FRAME_TOPIC, padding=6)
+        ff = ttk.LabelFrame(top, text=tr("client.latest_frame", topic=FRAME_TOPIC), padding=6)
         ff.grid(row=3, column=0, sticky="we", **pad)
         self.frame_info = ttk.Label(ff, text="—", font=("TkFixedFont", 10), justify="left")
         self.frame_info.pack(anchor="w")
 
-        rf = ttk.LabelFrame(top, text="Rigid bodies (" + RIGID_BODY_TOPIC + ")", padding=4)
+        rf = ttk.LabelFrame(top, text=tr("client.rigid_bodies_group", topic=RIGID_BODY_TOPIC), padding=4)
         rf.grid(row=4, column=0, sticky="nsew", **pad)
         top.rowconfigure(4, weight=1)
         self.table = RigidBodyTable(rf, height=6)
         self.table.pack(fill="both", expand=True)
 
-        lf = ttk.LabelFrame(top, text="Log", padding=4)
+        lf = ttk.LabelFrame(top, text=tr("common.log"), padding=4)
         lf.grid(row=5, column=0, sticky="nsew", **pad)
         top.rowconfigure(5, weight=1)
         self.log = LogPane(lf, height=7)
@@ -181,10 +187,32 @@ class ClientApp:
 
         cf = ttk.Frame(top)
         cf.grid(row=6, column=0, sticky="we", **pad)
-        ttk.Label(cf, text="Command line:").pack(side="left")
-        self.cmdline = tk.StringVar()
+        ttk.Label(cf, text=tr("common.command_line")).pack(side="left")
         ttk.Entry(cf, textvariable=self.cmdline, state="readonly").pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(cf, text="Copy", command=self._copy_cmdline).pack(side="left")
+        ttk.Button(cf, text=tr("common.copy"), command=self._copy_cmdline).pack(side="left")
+
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        """Set the start button and enabled widgets from the current state."""
+        if self._stopping:
+            self.start_btn.configure(state="disabled", text=tr("common.stopping"))
+        else:
+            self.start_btn.configure(state="normal",
+                                     text=tr("client.stop" if self.session else "client.start"))
+        enabled = not self.session and not self._stopping
+        for w in self.settings_widgets:
+            if w is self.dds_combo:
+                w.configure(state="readonly" if enabled else "disabled")
+            else:
+                w.configure(state="normal" if enabled else "disabled")
+
+    def _on_language(self, _code):
+        log_text = self.log.get_text()
+        self.top.destroy()
+        self._build()
+        self.log.set_text(log_text)
+        self._refresh()
 
     # -- settings ---------------------------------------------------------------
 
@@ -195,13 +223,13 @@ class ClientApp:
             if not 0 <= cfg["domain"] <= 232:
                 raise ValueError
         except ValueError:
-            raise ValueError("domain must be a number from 0 to 232")
+            raise ValueError(tr("common.err_domain"))
         try:
             cfg["mock_fps"] = float(self.v["mock_fps"].get())
             if cfg["mock_fps"] <= 0:
                 raise ValueError
         except ValueError:
-            raise ValueError("mock fps must be a positive number")
+            raise ValueError(tr("client.err_fps"))
         return cfg
 
     def _update_cmdline(self):
@@ -214,25 +242,19 @@ class ClientApp:
         self.root.clipboard_clear()
         self.root.clipboard_append(self.cmdline.get())
 
-    def _set_settings_enabled(self, enabled):
-        for w in self.settings_widgets:
-            if w is self.dds_combo:
-                w.configure(state="readonly" if enabled else "disabled")
-            else:
-                w.configure(state="normal" if enabled else "disabled")
-
     # -- actions ----------------------------------------------------------------
 
     def _toggle(self):
         if self.session:
-            self.start_btn.configure(state="disabled", text="Stopping…")
+            self._stopping = True
             session, self.session = self.session, None
+            self._sync_buttons()
             session.stop(done=lambda: self.root.after(0, self._stopped))
             return
         try:
             cfg = self._read_config()
         except ValueError as e:
-            messagebox.showerror("Invalid setting", str(e), parent=self.root)
+            messagebox.showerror(tr("common.invalid_setting"), str(e), parent=self.root)
             return
         try:
             with open(SETTINGS_FILE, "w") as f:
@@ -244,12 +266,11 @@ class ClientApp:
         self.rate_frames, self.rate_t, self.fps = 0, time.monotonic(), 0.0
         self.failures_shown = 0
         self.session = ClientSession(cfg)
-        self._set_settings_enabled(False)
-        self.start_btn.configure(text="Stop listening")
+        self._sync_buttons()
 
     def _stopped(self):
-        self.start_btn.configure(state="normal", text="Start listening")
-        self._set_settings_enabled(True)
+        self._stopping = False
+        self._sync_buttons()
 
     def _reset(self):
         s = self.session
@@ -284,7 +305,7 @@ class ClientApp:
         s = self.session
         if not s:
             for lamp in (self.lamp_dds, self.lamp_pubs, self.lamp_flow, self.lamp_check):
-                lamp.set(IDLE, "stopped")
+                lamp.set(IDLE, tr("common.stopped"))
             return
         c = s.cfg
         if s.state == "error":
@@ -293,7 +314,7 @@ class ClientApp:
                 lamp.set(IDLE, "")
             return
         if not s.monitor:
-            self.lamp_dds.set(WARN, "creating participant…")
+            self.lamp_dds.set(WARN, tr("common.creating_participant"))
             return
 
         now = time.monotonic()
@@ -316,17 +337,18 @@ class ClientApp:
             frame_text = self._frame_text(f) if f else None
 
         # 1. participant
-        self.lamp_dds.set(OK, "%s, domain %d" % (s.backend.name, c["domain"]))
+        self.lamp_dds.set(OK, tr("common.backend_domain", backend=s.backend.name, domain=c["domain"]))
 
         # 2. publishers
-        detail = "frame topic %d, rigid body topic %d" % matched
+        detail = tr("client.pubs_counts", frame=matched[0], rigid_body=matched[1])
         if any(matched):
             self.lamp_pubs.set(OK, detail)
         else:
             waited = now - s.started_at
-            self.lamp_pubs.set(WARN if waited < 5 else BAD, detail + (
-                "\nNo bridge found. Is NatNetToDDS running on domain %d, and is "
-                "multicast allowed between the machines?" % c["domain"] if waited >= 5 else "\ndiscovering…"))
+            if waited < 5:
+                self.lamp_pubs.set(WARN, detail + "\n" + tr("client.discovering"))
+            else:
+                self.lamp_pubs.set(BAD, detail + "\n" + tr("client.no_bridge", domain=c["domain"]))
 
         # 3. flow
         dt = now - self.rate_t
@@ -334,29 +356,27 @@ class ClientApp:
             self.fps = (frames - self.rate_frames) / dt
             self.rate_frames, self.rate_t = frames, now
         if last is not None and now - last < 1.0:
-            self.lamp_flow.set(OK, "%.1f fps\n%d frames, %d rigid body samples" % (self.fps, frames, rb_samples))
+            self.lamp_flow.set(OK, tr("client.flow_ok", fps=self.fps, frames=frames, rb_samples=rb_samples))
         elif last is not None:
-            self.lamp_flow.set(BAD, "no data for %.0fs\n%d frames received" % (now - last, frames))
+            self.lamp_flow.set(BAD, tr("client.flow_stopped", seconds=now - last, frames=frames))
         elif any(matched):
-            self.lamp_flow.set(WARN, "publisher matched but no samples yet. Is the bridge receiving "
-                                     "frames from Motive?")
+            self.lamp_flow.set(WARN, tr("client.flow_no_samples"))
         else:
-            self.lamp_flow.set(IDLE, "waiting…")
+            self.lamp_flow.set(IDLE, tr("common.waiting"))
 
         # 4. integrity
         if v:
             if n_failures:
-                self.lamp_check.set(BAD, "FAIL: %d of %d checks failed\nmissed %d, out of order %d" % (
-                    n_failures, checks, missed, ooo))
+                self.lamp_check.set(BAD, tr("client.verify_fail", failures=n_failures, checks=checks,
+                                            missed=missed, out_of_order=ooo))
             elif checks:
-                self.lamp_check.set(OK, "PASS: %d checks, %d frames named\nmissed %d, out of order %d" % (
-                    checks, named, missed, ooo))
+                self.lamp_check.set(OK, tr("client.verify_pass", checks=checks, named=named,
+                                           missed=missed, out_of_order=ooo))
             else:
-                self.lamp_check.set(IDLE, "verifying against mock…")
+                self.lamp_check.set(IDLE, tr("client.verifying"))
         elif frames:
-            color = OK if missed == 0 else WARN
-            self.lamp_check.set(color, "missed %d frames (%.2f%%)\nout of order / restarts %d" % (
-                missed, 100.0 * missed / (frames + missed), ooo))
+            self.lamp_check.set(OK if missed == 0 else WARN, tr(
+                "client.integrity", missed=missed, percent=100.0 * missed / (frames + missed), out_of_order=ooo))
         else:
             self.lamp_check.set(IDLE, "")
         for msg in new_failures:
@@ -369,18 +389,20 @@ class ClientApp:
 
     @staticmethod
     def _frame_text(f):
-        lines = ["frame %d   t=%.3f s   timecode %d.%d%s" % (
-                     f.frame_number, f.timestamp, f.timecode, f.timecode_sub,
-                     "   [RECORDING]" if f.is_recording else ""),
-                 "rigid bodies %d   skeletons %d   labeled markers %d   marker sets %d" % (
-                     len(f.rigid_bodies), len(f.skeletons), len(f.labeled_markers), len(f.marker_sets))]
+        line = tr("client.frame_line", frame=f.frame_number, t=f.timestamp,
+                  timecode=f.timecode, timecode_sub=f.timecode_sub)
+        if f.is_recording:
+            line += tr("client.recording")
+        lines = [line, tr("client.frame_counts", rigid_bodies=len(f.rigid_bodies), skeletons=len(f.skeletons),
+                          labeled_markers=len(f.labeled_markers), marker_sets=len(f.marker_sets))]
         for sk in f.skeletons[:4]:
-            lines.append("skeleton %d %s: %s" % (sk.id, sk.name or "?",
-                                                 ", ".join(b.name or str(b.id & 0xFFFF) for b in sk.bones)))
+            lines.append(tr("client.skeleton_line", id=sk.id, name=sk.name or "?",
+                            bones=", ".join(b.name or str(b.id & 0xFFFF) for b in sk.bones)))
         return "\n".join(lines)
 
 
 def main():
+    load_saved_language()
     root = tk.Tk()
     if sys.platform.startswith("linux"):
         ttk.Style(root).theme_use("clam")
