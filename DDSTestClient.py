@@ -111,6 +111,60 @@ class MockVerifier:
                          rb.mean_error, rb.tracking_valid, rb.name)
 
 
+class FlowMonitor:
+    """Takes samples from both readers and keeps the flow statistics."""
+
+    def __init__(self, frame_reader, rb_reader, verifier=None):
+        self.frame_reader = frame_reader
+        self.rb_reader = rb_reader
+        self.verifier = verifier
+        self.frames = self.rb_samples = self.missed = self.out_of_order = 0
+        self.last_frame_number = None
+        self.latest_frame = None
+        self.latest_rbs = {}            # rigid body id -> latest NatNet::RigidBody
+        self.rb_last_seen = {}          # rigid body id -> time.monotonic() of its last sample
+        self.last_sample_time = None    # time.monotonic() of the last sample
+
+    def poll(self):
+        """Take every available sample. Returns the number taken."""
+        taken = 0
+        for f in self.frame_reader.take():
+            taken += 1
+            self.frames += 1
+            if self.last_frame_number is not None:
+                if f.frame_number > self.last_frame_number + 1:
+                    self.missed += f.frame_number - self.last_frame_number - 1
+                elif f.frame_number <= self.last_frame_number:
+                    self.out_of_order += 1   # also happens when Motive playback loops
+            self.last_frame_number = f.frame_number
+            self.latest_frame = f
+            if self.verifier:
+                self.verifier.frame(f)
+
+        now = time.monotonic()
+        for rb in self.rb_reader.take():
+            taken += 1
+            self.rb_last_seen[rb.id] = now
+            self.rb_samples += 1
+            self.latest_rbs[rb.id] = rb
+            if self.verifier:
+                self.verifier.rigid_body(rb)
+
+        if taken:
+            self.last_sample_time = now
+        return taken
+
+    def matched_publishers(self):
+        """(frame topic publishers, rigid body topic publishers)"""
+        return self.frame_reader.matched_count(), self.rb_reader.matched_count()
+
+    def passed(self):
+        ok = self.frames > 0 or self.rb_samples > 0
+        if self.verifier:
+            ok = ok and not self.verifier.failures and self.verifier.checks > 0
+        return ok
+
+
 def print_frame(f, rigid_bodies):
     print("    frame %d  t=%.3fs  rigid bodies %d  skeletons %d  labeled markers %d  marker sets %d%s" % (
         f.frame_number, f.timestamp, len(f.rigid_bodies), len(f.skeletons),
@@ -144,55 +198,34 @@ def main():
     print("[dds] %s domain %d, subscribed to %s and %s" % (
         backend.name, args.domain, FRAME_TOPIC, RIGID_BODY_TOPIC))
 
-    frames = rb_samples = missed = out_of_order = 0
-    last_frame_number = None
-    latest_frame = None
-    latest_rbs = {}
+    mon = FlowMonitor(frame_reader, rb_reader, verifier)
 
     start = time.monotonic()
     last_report, frames_at_report = start, 0
     try:
         while args.duration <= 0 or time.monotonic() - start < args.duration:
-            for f in frame_reader.take():
-                frames += 1
-                if last_frame_number is not None:
-                    if f.frame_number > last_frame_number + 1:
-                        missed += f.frame_number - last_frame_number - 1
-                    elif f.frame_number <= last_frame_number:
-                        out_of_order += 1   # also happens when Motive playback loops
-                last_frame_number = f.frame_number
-                latest_frame = f
-                if verifier:
-                    verifier.frame(f)
-
-            for rb in rb_reader.take():
-                rb_samples += 1
-                latest_rbs[rb.id] = rb
-                if verifier:
-                    verifier.rigid_body(rb)
-
+            mon.poll()
             now = time.monotonic()
             if now - last_report >= 1.0:
-                fps = (frames - frames_at_report) / (now - last_report)
+                fps = (mon.frames - frames_at_report) / (now - last_report)
                 line = "[dds] frames %d (%.1f fps)  missed %d  rigid body samples %d  publishers: frame %d, rigid body %d" % (
-                    frames, fps, missed, rb_samples, frame_reader.matched_count(), rb_reader.matched_count())
+                    (mon.frames, fps, mon.missed, mon.rb_samples) + mon.matched_publishers())
                 if verifier:
                     line += "  verify: %d checks, %d failures" % (verifier.checks, len(verifier.failures))
                 print(line)
-                if latest_frame and not args.quiet:
-                    print_frame(latest_frame, latest_rbs)
-                last_report, frames_at_report = now, frames
+                if mon.latest_frame and not args.quiet:
+                    print_frame(mon.latest_frame, mon.latest_rbs)
+                last_report, frames_at_report = now, mon.frames
             time.sleep(0.005)
     except KeyboardInterrupt:
         pass
 
     print("\n==== summary ====")
-    print("frames received        : %d" % frames)
-    print("missed frames (gaps)   : %d" % missed)
-    print("out-of-order / restarts: %d" % out_of_order)
-    print("rigid body samples     : %d (%d bodies)" % (rb_samples, len(latest_rbs)))
-    ok = frames > 0 or rb_samples > 0
-    if not ok:
+    print("frames received        : %d" % mon.frames)
+    print("missed frames (gaps)   : %d" % mon.missed)
+    print("out-of-order / restarts: %d" % mon.out_of_order)
+    print("rigid body samples     : %d (%d bodies)" % (mon.rb_samples, len(mon.latest_rbs)))
+    if not (mon.frames or mon.rb_samples):
         print("FAIL: no data received. Is NatNetToDDS.py running on the same DDS domain?")
     if verifier:
         print("verification checks    : %d" % verifier.checks)
@@ -200,7 +233,7 @@ def main():
         print("verification failures  : %d" % len(verifier.failures))
         for msg in verifier.failures[:10]:
             print("    " + msg)
-        ok = ok and not verifier.failures and verifier.checks > 0
+    ok = mon.passed()
     print("RESULT: %s" % ("PASS" if ok else "FAIL"))
     backend.close()
     return 0 if ok else 1

@@ -15,6 +15,8 @@ Motive ──NatNet (UDP)──> NatNetToDDS.py ──DDS (RTPS)──> DDSTestC
 | `DDSTestClient.py` | A DDS subscriber. It prints the data and reports fps, dropped frames and optional value checks. |
 | `MockNatNetServer.py` | A simulated Motive server (NatNet 4.5) that streams a fixed synthetic scene, so you can test without cameras. |
 | `run_loopback_test.py` | One-command end-to-end test: mock → bridge → DDS → test client. |
+| `NatNetToDDSGui.py` | Window for the bridge: connection settings, status lights for each hop, live rigid body poses, and a button that starts the mock server. |
+| `DDSTestClientGui.py` | Window for the test client: DDS settings, status lights, the latest frame and rigid body poses, and optional mock verification. |
 | `idl/NatNetDDS.idl` | The DDS data model. Use it with `rtiddsgen` to build consumers in other languages. |
 | `natnet_dds/` | DDS type definitions (RTI and Cyclone) and a small backend wrapper. |
 | `natnet_sdk/` | `NatNetClient.py`, `MoCapData.py`, `DataDescriptions.py` and `PythonSample.py`, copied unmodified from `NatNetSDK/Samples/PythonClient` (SDK 4.5.1). |
@@ -70,6 +72,31 @@ Both implementations use the standard DDS-RTPS wire protocol and the same `@fina
    ```
 
    `missed` counts gaps in Motive frame numbers. Run `python DDSTestClient.py --help` for options (`--duration`, `--quiet`, …).
+
+## GUI
+
+If you'd rather not use the command line, both programs have a small window. They use Tkinter, which ships with Python, so there's nothing extra to install. (On Linux you may need your distribution's `python3-tk` package.)
+
+```bash
+python NatNetToDDSGui.py
+```
+
+```bash
+python DDSTestClientGui.py
+```
+
+Fill in the settings and press **Start**. Each window has four status lights, one for each hop the data takes. The first light that isn't green tells you where the data stops:
+
+| Bridge window | Test client window |
+|---|---|
+| 1. NatNet connection: Motive answered the handshake | 1. DDS participant: DDS started |
+| 2. Incoming frames: frames are arriving, with their rate | 2. Matched publishers: the bridge was discovered on this domain |
+| 3. DDS publisher: the DDS writers were created | 3. Data flow: samples are arriving, with their rate |
+| 4. DDS subscribers: how many readers matched each topic | 4. Integrity: missed frames, or PASS/FAIL with **Verify against mock** |
+
+When a light is amber or red, its text suggests what to check, for example the transmission type or the DDS domain. Below the lights, each window shows the live rigid body poses and a log. At the bottom is the equivalent command line, which you can copy into a script.
+
+To try the GUI without cameras, set the bridge's server and local interface to `127.0.0.1` and press **Start mock Motive**, then **Start bridge**. In the test client, tick **Verify against mock**. Each window remembers its last settings in your home folder (`.natnet_dds_bridge_gui.json` and `.natnet_dds_client_gui.json`).
 
 ## Testing without Motive
 

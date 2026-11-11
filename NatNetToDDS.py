@@ -87,6 +87,11 @@ class BridgeNatNetClient(NatNetClient):
         self.send_request(self.command_socket, self.NAT_REQUEST_MODELDEF, "",
                           (self.server_ip_address, self.command_port))
 
+    def send_connect(self):
+        """Re-send the NatNet connect request (run() sends it once)."""
+        self.send_request(self.command_socket, self.NAT_CONNECT, "",
+                          (self.server_ip_address, self.command_port))
+
 
 class NatNetToDDSBridge:
     """Converts SDK MoCapData frames to DDS samples and writes them."""
@@ -107,6 +112,8 @@ class NatNetToDDSBridge:
 
         self.frames_published = 0
         self.last_frame_number = None
+        self.last_frame_time = None     # time.monotonic() of the last published frame
+        self.latest_rigid_bodies = []   # RigidBodyPose list from the last frame
         self.last_error = None
 
     # -- NatNet callbacks ------------------------------------------------
@@ -197,8 +204,41 @@ class NatNetToDDSBridge:
 
         self.frames_published += 1
         self.last_frame_number = frame_number
+        self.last_frame_time = time.monotonic()
+        self.latest_rigid_bodies = rigid_bodies
         if suffix.tracked_models_changed and self.on_models_changed:
             self.on_models_changed()
+
+
+def create_natnet_client(bridge, server="127.0.0.1", client_address="127.0.0.1", multicast=True,
+                         multicast_address="239.255.42.99", command_port=1510, data_port=1511):
+    """Create a BridgeNatNetClient wired to `bridge` (not started yet).
+
+    Returns (client, request_descriptions), where request_descriptions()
+    asks the server for model definitions at most once per second.
+    """
+    client = BridgeNatNetClient()
+    client.set_print_level(0)
+    client.set_client_address(client_address)
+    client.set_server_address(server)
+    client.set_use_multicast(multicast)
+    client.multicast_address = multicast_address
+    client.command_port = command_port
+    client.data_port = data_port
+    client.new_frame_with_data_listener = bridge.on_frame
+    client.data_descriptions_listener = bridge.on_data_descriptions
+
+    # Re-request names when Motive reports the tracked models changed,
+    # at most once per second.
+    last_request = [0.0]
+
+    def request_descriptions():
+        now = time.monotonic()
+        if now - last_request[0] > 1.0:
+            last_request[0] = now
+            client.request_data_descriptions()
+    bridge.on_models_changed = request_descriptions
+    return client, request_descriptions
 
 
 def parse_args():
@@ -236,27 +276,9 @@ def main():
                                publish_rigid_bodies=not args.no_rigid_bodies,
                                reliable=args.reliable)
 
-    client = BridgeNatNetClient()
-    client.set_print_level(0)
-    client.set_client_address(args.client)
-    client.set_server_address(args.server)
-    client.set_use_multicast(args.multicast)
-    client.multicast_address = args.multicast_address
-    client.command_port = args.command_port
-    client.data_port = args.data_port
-    client.new_frame_with_data_listener = bridge.on_frame
-    client.data_descriptions_listener = bridge.on_data_descriptions
-
-    # Re-request names when Motive reports the tracked models changed,
-    # at most once per second.
-    last_request = [0.0]
-
-    def request_descriptions():
-        now = time.monotonic()
-        if now - last_request[0] > 1.0:
-            last_request[0] = now
-            client.request_data_descriptions()
-    bridge.on_models_changed = request_descriptions
+    client, request_descriptions = create_natnet_client(
+        bridge, args.server, args.client, args.multicast, args.multicast_address,
+        args.command_port, args.data_port)
 
     print("[natnet] connecting to %s from %s (%s)" % (
         args.server, args.client, "multicast " + args.multicast_address if args.multicast else "unicast"))
