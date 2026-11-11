@@ -1,0 +1,7 @@
+# RTI Connext DDS Python API (tested with 7.7.0.1). Needs an RTI license at
+# runtime: set RTI_LICENSE_FILE, or put rti_license.dat in the working dir.
+rti.connext>=7.0
+
+# Eclipse Cyclone DDS (tested with 11.1.0): license-free fallback,
+# wire-compatible with Connext.
+cyclonedds>=0.10

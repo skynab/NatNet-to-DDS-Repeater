@@ -1,0 +1,1321 @@
+"""
+ * Copyright(c) 2021 to 2022 ZettaScale Technology and others
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Eclipse Public License v. 2.0 which is available at
+ * http://www.eclipse.org/legal/epl-2.0, or the Eclipse Distribution License
+ * v. 1.0 which is available at
+ * http://www.eclipse.org/org/documents/edl-v10.php.
+ *
+ * SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
+"""
+
+from math import log2
+from enum import Enum
+from dataclasses import dataclass
+
+from .types import _type_code_align_size_default_mapping
+from ._support import Buffer, CdrKeyVmOp, CdrKeyVMOpType, KeyScanner, SerializeKind, DeserializeKind
+from ._support import XCDR1Constants as XCDR1
+from . import types as types
+
+# Note: the clayer always runs "normalize" on the serialized representation when a sample is constructed,
+# so the Python-based deserializers only see well-formed serialized representations.
+
+class KeyEnabled(Enum):
+    Never = 0
+    InKeylist = 1
+    InKeylistOrKeyless = 2
+
+class Machine:
+    """Given a type, serialize and deserialize"""
+    def __init__(self, type):
+        self.alignment = 1
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        pass
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        pass
+
+    def key_scan(self) -> KeyScanner:
+        pass
+
+    def cdr_key_machine_op(self, skip):
+        pass
+
+    def default_initialize(self):
+        pass
+
+
+class NoneMachine(Machine):
+    def __init__(self):
+        self.alignment = 1
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        pass
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        pass
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner()
+
+    def cdr_key_machine_op(self, skip):
+        return []
+
+    def default_initialize(self):
+        return None
+
+
+class PrimitiveMachine(Machine):
+    def __init__(self, type):
+        self.type = type
+        self.code, self.alignment, self.size, self.default = _type_code_align_size_default_mapping[type]
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(self.alignment)
+        buffer.write(self.code, self.size, value)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(self.alignment)
+        return buffer.read(self.code, self.size)
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.simple(self.alignment, self.size)
+
+    def cdr_key_machine_op(self, skip):
+        stream = [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, self.size, align=self.alignment)]
+        if not skip and not self.size == 1:
+            # Note: in the byteswap op the align field indicates the byteswap size
+            #       so the align=size is right, it is weird, agreed.
+            stream += [CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=self.size)]
+        return stream
+
+    def default_initialize(self):
+        return self.default
+
+
+class CharMachine(Machine):
+    def __init__(self):
+        self.alignment = 1
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.write('b', 1, ord(value))
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        return chr(buffer.read('b', 1))
+
+    def cdr_key_machine_op(self, skip):
+        return [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, 1, align=1)]
+
+    def default_initialize(self):
+        return '\0'
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.simple(1, 1)
+
+
+class StringMachine(Machine):
+    def __init__(self, bound=None):
+        self.alignment = 4
+        self.bound = bound
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.bound and len(value) > self.bound:
+            raise Exception("String longer than bound.")
+        buffer.align(4)
+        bytes = value.encode('utf-8')
+        buffer.write('I', 4, len(bytes) + 1)
+        buffer.write_bytes(bytes)
+        buffer.write('b', 1, 0)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(4)
+        numbytes = buffer.read('I', 4)
+        bytes = buffer.read_bytes(numbytes - 1)
+        buffer.read('b', 1)
+        return bytes.decode('utf-8')
+
+    def key_scan(self) -> KeyScanner:
+        if self.bound:
+            return KeyScanner.with_bound(4, self.bound + 4)
+        else:
+            return KeyScanner.infinity()
+
+    def cdr_key_machine_op(self, skip):
+        return [CdrKeyVmOp(CdrKeyVMOpType.Stream4ByteSize, skip, 1, align=1)]
+
+    def default_initialize(self):
+        return ""
+
+
+class BytesMachine(Machine):
+    def __init__(self, bound=None):
+        self.alignment = 4
+        self.bound = bound
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.bound and len(value) > self.bound:
+            raise Exception("Bytes longer than bound.")
+        buffer.align(4)
+        buffer.write('I', 4, len(value))
+        buffer.write_bytes(value)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(4)
+        numbytes = buffer.read('I', 4)
+        return buffer.read_bytes(numbytes)
+
+    def key_scan(self) -> KeyScanner:
+        if self.bound:
+            return KeyScanner.with_bound(4, self.bound + 4)
+        else:
+            return KeyScanner.infinity()
+
+    def cdr_key_machine_op(self, skip):
+        return [CdrKeyVmOp(CdrKeyVMOpType.Stream4ByteSize, skip, 1, align=1)]
+
+    def default_initialize(self):
+        return bytes(0)
+
+
+class ByteArrayMachine(Machine):
+    def __init__(self, size):
+        self.alignment = 1
+        self.size = size
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if len(value) != self.size:
+            raise Exception("Incorrectly sized array.")
+
+        buffer.write_bytes(value)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        return buffer.read_bytes(self.size)
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.simple(1, self.size)
+
+    def cdr_key_machine_op(self, skip):
+        return [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, self.size, align=1)]
+
+    def default_initialize(self):
+        return bytearray(self.size)
+
+
+class ArrayMachine(Machine):
+    def __init__(self, submachine, size, add_size_header=False):
+        self.size = size
+        self.submachine = submachine
+        self.alignment = submachine.alignment
+        self.add_size_header = add_size_header
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        assert len(value) == self.size
+
+        if self.add_size_header:
+            buffer.align(4)
+            buffer.write('I', 4, 0)
+            hpos = buffer.tell()
+
+        for v in value:
+            self.submachine.serialize(buffer, v, serialize_kind, key_enabled)
+
+        if self.add_size_header:
+            mpos = buffer.tell()
+            buffer.seek(hpos - 4)
+            buffer.write('I', 4, mpos - hpos)
+            buffer.seek(mpos)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.add_size_header:
+            buffer.align(4)
+            size = buffer.read('I', 4)
+            mpos = buffer.tell()
+
+        v = [self.submachine.deserialize(buffer, deserialize_kind, key_enabled) for i in range(self.size)]
+
+        if self.add_size_header:
+            assert buffer.tell() == mpos + size
+
+        return v
+
+    def key_scan(self) -> KeyScanner:
+        scan = KeyScanner()
+        scan.increase_by_multiplied_subresult(self.submachine.key_scan(), self.size)
+        return scan
+
+    def cdr_key_machine_op(self, skip):
+        if skip and self.add_size_header:
+            return [CdrKeyVmOp(CdrKeyVMOpType.Stream4ByteSize, True, size=1, align=4)]
+
+        subops = self.submachine.cdr_key_machine_op(skip)
+        return ([CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, size=4, align=4)] if self.add_size_header else []) + \
+            ([CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=4)] if not skip and self.add_size_header else []) + \
+            [CdrKeyVmOp(CdrKeyVMOpType.RepeatStatic, skip, self.size, value=len(subops) + 2)] + \
+            subops + [CdrKeyVmOp(CdrKeyVMOpType.EndRepeat, skip, len(subops))]
+
+    def default_initialize(self):
+        return [self.submachine.default_initialize() for i in range(self.size)]
+
+
+class SequenceMachine(Machine):
+    def __init__(self, submachine, maxlen=None, add_size_header=False):
+        self.submachine = submachine
+        self.alignment = 4
+        self.maxlen = maxlen
+        self.add_size_header = add_size_header
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.maxlen is not None:
+            assert len(value) <= self.maxlen
+
+        buffer.align(4)
+
+        if self.add_size_header:
+            buffer.write('I', 4, 0)
+            hpos = buffer.tell()
+
+        buffer.write('I', 4, len(value))
+
+        for v in value:
+            self.submachine.serialize(buffer, v, serialize_kind, key_enabled)
+
+        if self.add_size_header:
+            mpos = buffer.tell()
+            buffer.seek(hpos - 4)
+            buffer.write('I', 4, mpos - hpos)
+            buffer.seek(mpos)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(4)
+
+        if self.add_size_header:
+            size = buffer.read('I', 4)
+            mpos = buffer.tell()
+
+        num = buffer.read('I', 4)
+        v = [self.submachine.deserialize(buffer, deserialize_kind, key_enabled) for i in range(num)]
+
+        if self.add_size_header:
+            buffer.seek(mpos + size)
+
+        return v
+
+    def key_scan(self) -> KeyScanner:
+        if not self.maxlen:
+            return KeyScanner.infinity()
+
+        if self.add_size_header:
+            scan = KeyScanner.with_bound(4, 8)
+        else:
+            scan = KeyScanner.with_bound(4, 4)
+
+        scan.increase_by_multiplied_subresult(self.submachine.key_scan(), self.maxlen)
+
+        if scan.size > 1_000_000:
+            return KeyScanner.infinity()
+        return scan
+
+    def cdr_key_machine_op(self, skip):
+        if skip and self.add_size_header:
+            return [CdrKeyVmOp(CdrKeyVMOpType.Stream4ByteSize, True, size=1, align=4)]
+
+        subops = self.submachine.cdr_key_machine_op(skip)
+        return ([CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, size=4, align=4)] if self.add_size_header else []) + \
+            ([CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=4)] if not skip and self.add_size_header else []) + \
+            [CdrKeyVmOp(CdrKeyVMOpType.Repeat4ByteSize, skip, value=len(subops) + 2)] + \
+            subops + [CdrKeyVmOp(CdrKeyVMOpType.EndRepeat, skip, len(subops))]
+
+    def default_initialize(self):
+        return []
+
+
+class UnionMachine(Machine):
+    def __init__(self, type, discriminator_machine, labels_submachines, default_case=None):
+        self.type = type
+        self.labels_submachines = labels_submachines
+        self.alignment = max(s.alignment for s in labels_submachines.values())
+        self.alignment = max(self.alignment, discriminator_machine.alignment)
+        self.discriminator = discriminator_machine
+        self.default = default_case
+        self.discriminator_is_key = type.__idl_annotations__.get("discriminator_is_key", False)
+
+    def serialize(self, buffer, union, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        discr, value = union.get()
+
+        if (serialize_kind == SerializeKind.KeyDefinitionOrder or serialize_kind == SerializeKind.KeyNormalized) and self.discriminator_is_key:
+            try:
+                if discr is None:
+                    self.discriminator.serialize(buffer, union.__idl_default_discriminator__, serialize_kind, key_enabled)
+                else:
+                    self.discriminator.serialize(buffer, discr, serialize_kind, key_enabled)
+                return
+            except Exception as e:
+                raise Exception(f"Failed to encode union, {self.type}, value is {value}, discriminator is {discr}") from e
+
+        try:
+            if discr is None:
+                self.discriminator.serialize(buffer, union.__idl_default_discriminator__, serialize_kind, key_enabled)
+                if self.default:
+                    self.default.serialize(buffer, value, serialize_kind, KeyEnabled.Never)
+            elif discr not in self.labels_submachines:
+                self.discriminator.serialize(buffer, discr, serialize_kind, key_enabled)
+                if self.default:
+                    self.default.serialize(buffer, value, serialize_kind, KeyEnabled.Never)
+            else:
+                self.discriminator.serialize(buffer, discr, serialize_kind, key_enabled)
+                self.labels_submachines[discr].serialize(buffer, value, serialize_kind, KeyEnabled.Never)
+        except Exception as e:
+            raise Exception(f"Failed to encode union, {self.type}, value is {value}, discriminator is {discr}") from e
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        label = self.discriminator.deserialize(buffer, deserialize_kind, key_enabled)
+
+        if label not in self.labels_submachines:
+            if self.default:
+                contents = self.default.deserialize(buffer, deserialize_kind, KeyEnabled.Never)
+            else:
+                contents = None
+        else:
+            contents = self.labels_submachines[label].deserialize(buffer, deserialize_kind, KeyEnabled.Never)
+
+        return self.type(discriminator=label, value=contents)
+
+    def key_scan(self) -> KeyScanner:
+        dscan = self.discriminator.key_scan()
+        if self.discriminator_is_key:
+            return dscan
+
+        scan = KeyScanner()
+        for _, machine in self.labels_submachines.items():
+            scan = scan.max(machine.key_scan())
+
+        dscan.increase_by_multiplied_subresult(scan, 1)
+        return dscan
+
+    def cdr_key_machine_op(self, skip):  # TODO: check again
+        headers = []
+        opsets = []
+        union_type = {
+            1: CdrKeyVMOpType.Union1Byte,
+            2: CdrKeyVMOpType.Union2Byte,
+            4: CdrKeyVMOpType.Union4Byte,
+            8: CdrKeyVMOpType.Union8Byte
+        }[self.discriminator.alignment]
+
+        buffer = Buffer(_bytes=self.discriminator.alignment)
+
+        value_skip = skip or self.type.__idl_discriminator_is_key__
+
+        for label, submachine in self.labels_submachines.items():
+            buffer.seek(0)
+            self.discriminator.serialize(buffer, label)
+            buffer.seek(0)
+            value = buffer.read({1: 'B', 2: 'H', 4: 'I', 8: 'Q'}[self.discriminator.alignment], self.discriminator.alignment)
+            headers.append(CdrKeyVmOp(union_type, skip, value=value))
+            opsets.append(submachine.cdr_key_machine_op(value_skip))
+
+        lens = [len(o) + 2 for o in opsets]
+
+        if self.default is not None:
+            opsets.append(self.discriminator.cdr_key_machine_op(skip) + self.default.cdr_key_machine_op(value_skip))
+            lens.append(len(opsets[-1]))
+        else:
+            lens[-1] -= 1
+
+        jumps = [sum(lens[i:]) for i in range(len(lens))]
+
+        for i in range(len(headers)):
+            if i != len(opsets) - 1:
+                opsets[i].append(CdrKeyVmOp(CdrKeyVMOpType.Jump, skip, size=jumps[i + 1] + 1))
+            headers[i].size = lens[i]
+            opsets[i] = [headers[i]] + opsets[i]
+
+        return sum(opsets, [])
+
+    def default_initialize(self):
+        return self.type(
+            discriminator=self.type.__idl_default_discriminator__,
+            value=None if self.default is None else self.default.default_initialize()
+        )
+
+
+class MappingMachine(Machine):
+    def __init__(self, key_machine, value_machine):
+        self.key_machine = key_machine
+        self.value_machine = value_machine
+        self.alignment = 4
+
+    def serialize(self, buffer, values, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(4)
+        buffer.write('I', 4, len(values))
+
+        for key, value in values.items():
+            self.key_machine.serialize(buffer, key, serialize_kind, key_enabled)
+            self.value_machine.serialize(buffer, value, serialize_kind, key_enabled)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        ret = {}
+        buffer.align(4)
+        num = buffer.read('I', 4)
+
+        for _i in range(num):
+            key = self.key_machine.deserialize(buffer, deserialize_kind, key_enabled)
+            value = self.value_machine.deserialize(buffer, deserialize_kind, key_enabled)
+            ret[key] = value
+
+        return ret
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.infinity()
+
+    def cdr_key_machine_op(self, skip):
+        raise NotImplementedError()
+
+    def default_initialize(self):
+        return {}
+
+
+class StructMachine(Machine):
+    def __init__(self, object, members_machines, keylist):
+        self.type = object
+        self.members_machines = members_machines
+        self.keylist = keylist
+
+    def key_enabled(self, member, key_enabled):
+        if key_enabled == KeyEnabled.Never:
+            return KeyEnabled.Never
+        elif key_enabled == KeyEnabled.InKeylist:
+            return KeyEnabled.InKeylistOrKeyless if self.keylist and member in self.keylist else KeyEnabled.Never
+        else:
+            assert key_enabled == KeyEnabled.InKeylistOrKeyless
+            return KeyEnabled.InKeylistOrKeyless if not self.keylist or member in self.keylist else KeyEnabled.Never
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        #  We use the fact here that dicts retain their insertion order
+        #  This is guaranteed from python 3.7
+        for member, machine in self.members_machines.items():
+            m_key_enabled = self.key_enabled(member, key_enabled)
+            if serialize_kind != SerializeKind.DataSample and m_key_enabled == KeyEnabled.Never:
+                continue
+
+            try:
+                machine.serialize(buffer, getattr(value, member), serialize_kind, m_key_enabled)
+            except Exception as e:
+                raise Exception(f"Failed to encode member {member}, value is {getattr(value, member)}") from e
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        valuedict = {}
+        for member, machine in self.members_machines.items():
+            m_key_enabled = self.key_enabled(member, key_enabled)
+            if deserialize_kind != DeserializeKind.DataSample and m_key_enabled == KeyEnabled.Never:
+                valuedict[member] = machine.default_initialize()
+            else:
+                valuedict[member] = machine.deserialize(buffer, deserialize_kind, m_key_enabled)
+        return self.type(**valuedict)
+
+    def key_scan(self) -> KeyScanner:
+        scan = KeyScanner()
+
+        for member, machine in self.members_machines.items():
+            if self.keylist and member not in self.keylist:
+                continue
+            scan.increase_by_multiplied_subresult(machine.key_scan(), 1)
+
+        return scan
+
+    def cdr_key_machine_op(self, skip):
+        return sum(
+            (
+                m.cdr_key_machine_op(skip or (self.keylist and name not in self.keylist))
+                for name, m in self.members_machines.items()
+            ),
+            []
+        )
+
+    def default_initialize(self):
+        valuedict = {}
+        for member, machine in self.members_machines.items():
+            valuedict[member] = machine.default_initialize()
+        return self.type(**valuedict)
+
+
+class InstanceMachine(Machine):
+    def __init__(self, object, use_version_2):
+        self.type = object
+        self.alignment = 1
+        self.use_version_2 = use_version_2
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.type.__idl__.v1_machine is None:
+            self.type.__idl__.populate()
+
+        if self.use_version_2:
+            return self.type.__idl__.v2_machine.serialize(buffer, value, serialize_kind, key_enabled)
+        else:
+            return self.type.__idl__.v1_machine.serialize(buffer, value, serialize_kind, key_enabled)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.type.__idl__.v1_machine is None:
+            self.type.__idl__.populate()
+
+        if self.use_version_2:
+            return self.type.__idl__.v2_machine.deserialize(buffer, deserialize_kind, key_enabled)
+        else:
+            return self.type.__idl__.v1_machine.deserialize(buffer, deserialize_kind, key_enabled)
+
+    def key_scan(self):
+        return self.type.__idl__.key_scan(use_version_2=self.use_version_2)
+
+    def cdr_key_machine_op(self, skip):
+        return self.type.__idl__.cdr_key_machine(skip, use_version_2=self.use_version_2)
+
+    def default_initialize(self):
+        if self.type.__idl__.v1_machine is None:
+            self.type.__idl__.populate()
+
+        if self.use_version_2:
+            return self.type.__idl__.v2_machine.default_initialize()
+        else:
+            return self.type.__idl__.v1_machine.default_initialize()
+
+
+class EnumMachine(Machine):
+    def __init__(self, enum):
+        self.enum: Enum = enum
+        self.alignment = 4
+        self.size = 4
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(4)
+        if type(value) == int:
+            buffer.write("I", 4, value)
+            return
+        buffer.write("I", 4, value.value)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(4)
+        v = buffer.read("I", 4)
+        try:
+            return self.enum(v)
+        except ValueError:
+            return v
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.simple(4, 4)
+
+    def cdr_key_machine_op(self, skip):
+        stream = [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, 4, align=4)]
+        if not skip:
+            stream += [CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=4)]
+        return stream
+
+    def default_initialize(self):
+        return self.enum.__idl_enum_default_value__
+
+
+class BitBoundEnumMachine(Machine):
+    def __init__(self, enum, bit_bound):
+        self.bit_bound = bit_bound
+        self.encoder = [types.uint8, types.uint16, types.uint32, types.uint64][int(log2(bit_bound)) - 3]
+        self.enum: Enum = enum
+        self.code, self.alignment, self.size, _ = _type_code_align_size_default_mapping[self.encoder]
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if type(value) == int:
+            buffer.align(self.alignment)
+            buffer.write(self.code, self.size, value)
+            return
+        buffer.align(self.alignment)
+        buffer.write(self.code, self.size, value.value)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(self.alignment)
+        v = buffer.read(self.code, self.size)
+        try:
+            return self.enum(v)
+        except ValueError:
+            return v
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.simple(self.alignment, self.size)
+
+    def cdr_key_machine_op(self, skip):
+        stream = [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, self.size, align=self.alignment)]
+        if not skip:
+            stream += [CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=self.alignment)]
+        return stream
+
+    def default_initialize(self):
+        return self.enum.__idl_enum_default_value__
+
+
+class OptionalMachine(Machine):
+    def __init__(self, submachine, memberid_muflag, use_version_2):
+        self.submachine = submachine
+        self.memberid_muflag = memberid_muflag
+        self.use_version_2 = use_version_2
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        assert not (serialize_kind == SerializeKind.KeyDefinitionOrder or serialize_kind == SerializeKind.KeyNormalized)
+        if self.use_version_2:
+            if value is None:
+                buffer.write('?', 1, False)
+            else:
+                buffer.write('?', 1, True)
+                self.submachine.serialize(buffer, value, serialize_kind, KeyEnabled.Never)
+        else:
+            # TODO: compact variant if it fits
+            buffer.align(4)
+            buffer.write('H', 2, XCDR1.PL_SHORT_PID_EXTENDED | XCDR1.PL_SHORT_FLAG_MU)
+            buffer.write('H', 2, XCDR1.PL_SHORT_PID_EXT_LEN)
+            buffer.write('I', 4, self.memberid_muflag)
+            hpos = buffer.tell()
+            buffer.write('I', 4, 0)
+            dpos = buffer.tell()
+            if value is not None:
+                old_align_offset = buffer.set_align_offset(dpos)
+                self.submachine.serialize(buffer, value, serialize_kind, KeyEnabled.Never)
+                buffer.set_align_offset(old_align_offset)
+                fpos = buffer.tell()
+                buffer.seek(hpos)
+                buffer.write('I', 4, fpos - dpos)
+                buffer.seek(fpos)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.use_version_2:
+            if buffer.read('?', 1):
+                return self.submachine.deserialize(buffer, deserialize_kind, KeyEnabled.Never)
+            return None
+        else:
+            buffer.align(4)
+            header = buffer.read('H', 2)
+            membersize = buffer.read('H', 2)
+            if (header & XCDR1.PL_SHORT_PID_MASK) == XCDR1.PL_SHORT_PID_EXTENDED:
+                # extended form; memberlen should be XCDR1.PL_SHORT_PID_EXT_LEN
+                header = buffer.read('I', 4)
+                membersize = buffer.read('I', 4)
+            # header & XCDR1.PL_SHORT_PID_MASK should be self.memberid, here we assume it is
+            # (C code checks it in "normalize", which always runs before we get here)
+            if membersize == 0:
+                return None
+            else:
+                old_align_offset = buffer.set_align_offset(buffer.tell())
+                val = self.submachine.deserialize(buffer, deserialize_kind, KeyEnabled.Never)
+                buffer.set_align_offset(old_align_offset)
+                return val
+
+    def key_scan(self) -> KeyScanner:
+        scan = KeyScanner.simple(1, 1)
+        scan.increase_by_multiplied_subresult(self.submachine.key_scan(), 1)
+        return scan
+
+    def cdr_key_machine_op(self, skip):
+        subops = self.submachine.cdr_key_machine_op(skip)
+        return [CdrKeyVmOp(CdrKeyVMOpType.Optional, skip, len(subops) + 1, align=1)] + subops
+
+    def default_initialize(self):
+        return None
+
+
+class PlainCdrV2ArrayOfPrimitiveMachine(Machine):
+    def __init__(self, type, length):
+        code, self.alignment, size, default = types._type_code_align_size_default_mapping[type]
+        self.length = length
+        self.size = size * length
+        self.code = str(length) + code
+        self.default = [default] * length
+        self.subtype = type
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        assert len(value) == self.length
+        buffer.align(self.alignment)
+        buffer.write_multi(self.code, self.size, *value)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(self.alignment)
+        return list(buffer.read_multi(self.code, self.size))
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.simple(self.alignment, self.size)
+
+    def cdr_key_machine_op(self, skip):
+        stream = [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, self.size, align=self.alignment)]
+        if not skip and not self.alignment == 1:
+            stream += [CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=self.alignment)]
+        return stream
+
+    def default_initialize(self):
+        return self.default.copy()
+
+
+class PlainCdrV2SequenceOfPrimitiveMachine(Machine):
+    def __init__(self, type, max_length=None):
+        self.code, self.alignment, self.size, _ = types._type_code_align_size_default_mapping[type]
+        self.max_length = max_length
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        assert self.max_length is None or len(value) <= self.max_length
+        buffer.align(4)
+        buffer.write('I', 4, len(value))
+        if value:
+            buffer.align(self.alignment)
+            buffer.write_multi(f"{len(value)}{self.code}", self.size * len(value), *value)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(4)
+        length = buffer.read('I', 4)
+        if length:
+            buffer.align(self.alignment)
+            return list(buffer.read_multi(f"{length}{self.code}", self.size * length))
+        else:
+            return []
+
+    def key_scan(self) -> KeyScanner:
+        if not self.max_length:
+            return KeyScanner.infinity()
+
+        scan = KeyScanner.with_bound(4, 4)
+        scan.increase_by_multiplied_subresult(
+            KeyScanner.simple(self.size, self.size),
+            self.max_length
+        )
+
+        if scan.size > 1_000_000:
+            return KeyScanner.infinity()
+        return scan
+
+    def cdr_key_machine_op(self, skip):
+        stream = [CdrKeyVmOp(
+            CdrKeyVMOpType.Stream4ByteSize,
+            skip, self.size, align=self.alignment
+        )]
+        if not skip and self.size != 1:
+            stream += [CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=self.size)]
+        return stream
+
+    def default_initialize(self):
+        return []
+
+
+class DelimitedCdrAppendableStructMachine(Machine):
+    def __init__(self, type, member_machines, keylist):
+        self.alignment = 4
+        self.type = type
+        self.member_machines = member_machines
+        self.keylist = keylist
+
+    def key_enabled(self, member, key_enabled):
+        if key_enabled == KeyEnabled.Never:
+            return KeyEnabled.Never
+        elif key_enabled == KeyEnabled.InKeylist:
+            return KeyEnabled.InKeylistOrKeyless if self.keylist and member in self.keylist else KeyEnabled.Never
+        else:
+            assert key_enabled == KeyEnabled.InKeylistOrKeyless
+            return KeyEnabled.InKeylistOrKeyless if not self.keylist or member in self.keylist else KeyEnabled.Never
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        # write dummy header
+        buffer.align(4)
+        hpos = buffer.tell()
+        buffer.write('I', 4, 0)
+
+        # write member data
+        dpos = buffer.tell()
+        for member, machine in self.member_machines.items():
+            m_key_enabled = self.key_enabled(member, key_enabled)
+            if serialize_kind != SerializeKind.DataSample and m_key_enabled == KeyEnabled.Never:
+                continue
+
+            try:
+                machine.serialize(buffer, getattr(value, member), serialize_kind, m_key_enabled)
+            except Exception as e:
+                raise Exception(f"Failed to encode member {member}, value is {getattr(value, member)}") from e
+
+        fpos = buffer.tell()
+
+        # Write size header word back
+        buffer.seek(hpos)
+        buffer.write('I', 4, fpos - dpos)
+        buffer.seek(fpos)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        # read header
+        buffer.align(4)
+        size = buffer.read('I', 4)
+        hpos = buffer.tell()
+
+        data = {}
+        for member, machine in self.member_machines.items():
+            m_key_enabled = self.key_enabled(member, key_enabled)
+            if buffer.tell() - hpos >= size:
+                data[member] = machine.default_initialize()
+            elif deserialize_kind != DeserializeKind.DataSample and m_key_enabled == KeyEnabled.Never:
+                data[member] = machine.default_initialize()
+            else:
+                data[member] = machine.deserialize(buffer, deserialize_kind, m_key_enabled)
+
+            if buffer.tell() - hpos > size:
+                raise Exception("Struct was not contained inside header indicated size, stream corrupt.")
+
+        buffer.seek(hpos + size)
+        return self.type(**data)
+
+    def key_scan(self) -> KeyScanner:
+        scan = KeyScanner()
+
+        for member, machine in self.member_machines.items():
+            if self.keylist and member not in self.keylist:
+                continue
+            scan.increase_by_multiplied_subresult(machine.key_scan(), 1)
+
+        return scan
+
+    def cdr_key_machine_op(self, skip):
+        if skip:
+            # This sub-struct contains nothing interesting, we can skip it
+            return [CdrKeyVmOp(CdrKeyVMOpType.StructHeader, skip=skip, size=0, value=0, align=4)]
+
+        members = sum(
+            (
+                m.cdr_key_machine_op(self.keylist and name not in self.keylist)
+                for name, m in self.member_machines.items()
+            ),
+            []
+        )
+        while members and members[-1].skip:
+            members.pop()
+
+        return [CdrKeyVmOp(CdrKeyVMOpType.AppendableHeader, False)] + \
+            members + \
+            [CdrKeyVmOp(CdrKeyVMOpType.AppendableJumpToEnd, False)]
+
+    def default_initialize(self):
+        valuedict = {}
+        for member, machine in self.member_machines.items():
+            valuedict[member] = machine.default_initialize()
+        return self.type(**valuedict)
+
+
+class DelimitedCdrAppendableUnionMachine(Machine):
+    def __init__(self, type, discriminator_machine, labels_submachines, default_case=None):
+        self.type = type
+        self.labels_submachines = labels_submachines
+        self.alignment = 4
+        self.discriminator = discriminator_machine
+        self.default = default_case
+        self.discriminator_is_key = type.__idl_annotations__.get("discriminator_is_key", False)
+
+    def serialize(self, buffer, union, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        # write dummy header
+        buffer.align(4)
+        hpos = buffer.tell()
+        buffer.write('I', 4, 0)
+
+        dpos = buffer.tell()
+        discr, value = union.get()
+
+        if (serialize_kind == SerializeKind.KeyDefinitionOrder or serialize_kind == SerializeKind.KeyNormalized) and self.discriminator_is_key:
+            try:
+                if discr is None:
+                    self.discriminator.serialize(buffer, union.__idl_default_discriminator__, serialize_kind)
+                else:
+                    self.discriminator.serialize(buffer, discr, serialize_kind)
+                return
+            except Exception as e:
+                raise Exception(f"Failed to encode union, {self.type}, value is {value}") from e
+
+        try:
+            if discr is None:
+                self.discriminator.serialize(buffer, union.__idl_default_discriminator__)
+                if self.default:
+                    self.default.serialize(buffer, value, serialize_kind)
+            elif discr not in self.labels_submachines:
+                self.discriminator.serialize(buffer, discr, serialize_kind)
+                if self.default:
+                    self.default.serialize(buffer, value, serialize_kind)
+            else:
+                self.discriminator.serialize(buffer, discr, serialize_kind)
+                self.labels_submachines[discr].serialize(buffer, value, serialize_kind)
+        except Exception as e:
+            raise Exception(f"Failed to encode union, {self.type}, value is {value}") from e
+
+        fpos = buffer.tell()
+
+        # Write size header word back
+        buffer.seek(hpos)
+        buffer.write('I', 4, fpos - dpos)
+        buffer.seek(fpos)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        # read header
+        buffer.align(4)
+        size = buffer.read('I', 4)
+        hpos = buffer.tell()
+
+        label = self.discriminator.deserialize(buffer, deserialize_kind)
+        lpos = buffer.tell()
+
+        if label not in self.labels_submachines:
+            if lpos == hpos + size:
+                return self.default_initialize()
+
+            if self.default:
+                contents = self.default.deserialize(buffer, deserialize_kind)
+            else:
+                contents = None
+        else:
+            if lpos == hpos + size:
+                contents = self.labels_submachines[label].default_initialize()
+            else:
+                contents = self.labels_submachines[label].deserialize(buffer, deserialize_kind)
+
+        buffer.seek(hpos + size)
+        return self.type(discriminator=label, value=contents)
+
+    def key_scan(self) -> KeyScanner:
+        dscan = self.discriminator.key_scan()
+        if self.discriminator_is_key:
+            return dscan
+
+        scan = KeyScanner()
+        for _, machine in self.labels_submachines.items():
+            scan = scan.max(machine.key_scan())
+
+        dscan.increase_by_multiplied_subresult(scan, 1)
+        return dscan
+
+    def cdr_key_machine_op(self, skip):  # TODO: check again
+        if skip:
+            # This union contains nothing interesting, we can skip it
+            return [CdrKeyVmOp(CdrKeyVMOpType.StructHeader, skip=skip, size=0, value=0, align=4)]
+
+        headers = []
+        opsets = []
+        union_type = {
+            1: CdrKeyVMOpType.Union1Byte,
+            2: CdrKeyVMOpType.Union2Byte,
+            4: CdrKeyVMOpType.Union4Byte,
+            8: CdrKeyVMOpType.Union8Byte
+        }[self.discriminator.alignment]
+
+        buffer = Buffer(_bytes=self.discriminator.alignment)
+
+        value_skip = skip or self.type.__idl_discriminator_is_key__
+
+        for label, submachine in self.labels_submachines.items():
+            buffer.seek(0)
+            self.discriminator.serialize(buffer, label)
+            buffer.seek(0)
+            value = buffer.read({1: 'B', 2: 'H', 4: 'I', 8: 'Q'}[self.discriminator.alignment], self.discriminator.alignment)
+            headers.append(CdrKeyVmOp(union_type, skip, value=value))
+            opsets.append(submachine.cdr_key_machine_op(value_skip))
+
+        lens = [len(o) + 2 for o in opsets]
+
+        if self.default is not None:
+            opsets.append(self.discriminator.cdr_key_machine_op(skip) + self.default.cdr_key_machine_op(value_skip))
+            lens.append(len(opsets[-1]))
+        else:
+            lens[-1] -= 1
+
+        jumps = [sum(lens[i:]) for i in range(len(lens))]
+
+        for i in range(len(headers)):
+            if i != len(opsets) - 1:
+                opsets[i].append(CdrKeyVmOp(CdrKeyVMOpType.Jump, skip, size=jumps[i + 1] + 1))
+            headers[i].size = lens[i]
+            opsets[i] = [headers[i]] + opsets[i]
+
+        return [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip=True, size=4, align=4)] + sum(opsets, [])
+
+    def default_initialize(self):
+        return self.type(
+            discriminator=self.type.__idl_default_discriminator__,
+            value=None if self.default is None else self.default.default_initialize()
+        )
+
+
+# Todo: Mutable unions
+
+class LenType(Enum):
+    OneByte = 0
+    TwoByte = 1
+    FourByte = 2
+    EightByte = 3
+    NextIntLen = 4
+    NextIntDualUseLen = 5
+    NextIntDualUse4Len = 6
+    NextIntDualUse8Len = 7
+
+
+@dataclass
+class MutableMember:
+    name: str
+    key: bool
+    optional: bool
+    lentype: LenType
+    must_understand: bool
+    memberid: int
+    machine: Machine
+    header: int = 0
+
+    def __post_init__(self):
+        # "must understand" also gets set for key fields, but whether a field is a key
+        # field or not is dependent on the annotation and the parent, and therefore more
+        # easily done during serialization
+        self.header = ((1 if self.must_understand else 0) << 31) + (self.lentype.value << 28) + (self.memberid & 0x0fffffff)
+
+
+class MustUnderstandFailure(Exception):
+    pass
+
+class KeyFieldNotProvidedFailure(Exception):
+    pass
+
+class PLCdrMutableStructMachine(Machine):
+    def __init__(self, type, mutablemembers, use_version_2):
+        self.alignment = 4
+        self.type = type
+        self.mutablemembers = mutablemembers
+        self.use_version_2 = use_version_2
+        self.keylist = [m for m in self.mutablemembers if m.key]
+        self.mutmem_by_id = {
+            m.memberid: m for m in mutablemembers
+        }
+        self.init_map = {
+            m.name: None for m in mutablemembers
+        }
+
+    def key_enabled(self, member, key_enabled):
+        if key_enabled == KeyEnabled.Never:
+            return KeyEnabled.Never
+        elif key_enabled == KeyEnabled.InKeylist:
+            return KeyEnabled.InKeylistOrKeyless if member.key else KeyEnabled.Never
+        else:
+            assert key_enabled == KeyEnabled.InKeylistOrKeyless
+            return KeyEnabled.InKeylistOrKeyless if not self.keylist or member.key else KeyEnabled.Never
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.use_version_2:
+            buffer.align(4)
+            hpos = buffer.tell()
+            buffer.write('I', 4, 0)
+
+        # write member data
+        dpos = buffer.tell()
+        members = sorted(self.mutablemembers, key=lambda x: x.memberid) if serialize_kind == SerializeKind.KeyNormalized else self.mutablemembers
+        for mutablemember in members:
+            m_key_enabled = self.key_enabled(mutablemember, key_enabled)
+            if serialize_kind != SerializeKind.DataSample and m_key_enabled == KeyEnabled.Never:
+                continue
+
+            member_value = getattr(value, mutablemember.name)
+            if mutablemember.optional and member_value is None:
+                continue
+
+            buffer.align(4)
+            if self.use_version_2:
+                # It appears RTI also can't handle "must understand" on key fields in
+                # XCDR2, even though XTypes 1.3 requires it.  This should add:
+                #   | ((1 if m_key_enabled != KeyEnabled.Never else 0) << 31)
+                buffer.write('I', 4, mutablemember.header)
+            else:
+                # TODO: use compact variant when member id and the max serialized size of the type are small enough
+                buffer.write('H', 2, XCDR1.PL_SHORT_PID_EXTENDED | XCDR1.PL_SHORT_FLAG_MU)
+                buffer.write('H', 2, XCDR1.PL_SHORT_PID_EXT_LEN)
+                # It appears RTI can't handle "must understand" on key fields, even though
+                # XTypes 1.3 requires it.  This should read:
+                #   mu_flag = (1 if mutablemember.must_understand or
+                #              m_key_enabled != KeyEnabled.Never else 0) << 30
+                mu_flag = (1 if mutablemember.must_understand else 0) << 30
+                buffer.write('I', 4, mu_flag | mutablemember.memberid)
+                assert mutablemember.lentype == LenType.NextIntLen
+
+            mpos = buffer.tell()
+            if mutablemember.lentype == LenType.NextIntLen:
+                buffer.write('I', 4, 0)
+
+            old_align_offset = None
+            if not self.use_version_2:
+                old_align_offset = buffer.set_align_offset(buffer.tell())
+
+            mutablemember.machine.serialize(buffer, member_value, serialize_kind, m_key_enabled)
+
+            if not self.use_version_2:
+                buffer.set_align_offset(old_align_offset)
+                # RTI implements/prefers/requires XTypes 1.1-style XCDR1 with the lengths padded to a
+                # multiple of 4. XTypes 1.3 requires the lengths to not be padded. There's no good way
+                # out ...
+                buffer.align(4)
+
+            if mutablemember.lentype == LenType.NextIntLen:
+                ampos = buffer.tell()
+                buffer.seek(mpos)
+                buffer.write('I', 4, ampos - mpos - 4)
+                buffer.seek(ampos)
+
+        if self.use_version_2:
+            # Write size header word back
+            fpos = buffer.tell()
+            buffer.seek(hpos)
+            buffer.write('I', 4, fpos - dpos)
+            buffer.seek(fpos)
+        else:
+            # Write sentinel
+            buffer.align(4)
+            buffer.write('H', 2, XCDR1.PL_SHORT_PID_LIST_END | XCDR1.PL_SHORT_FLAG_MU)
+            buffer.write('H', 2, 0)
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        if self.use_version_2:
+            # read header
+            buffer.align(4)
+            struct_size = buffer.read('I', 4)
+        else:
+            # a lie, but it helps with the loop needed for XCDR2
+            struct_size = 0xffffffff
+        hpos = buffer.tell()
+
+        data = self.init_map.copy()
+        while buffer.tell() - hpos < struct_size:
+            buffer.align(4)
+            if self.use_version_2:
+                header = buffer.read('I', 4)
+                must_understand = ((header >> 31) & 1) > 0
+                memberid = header & 0x0fffffff
+                lc = (header >> 28) & 0x7
+                if lc < 4:
+                    membersize = 2 ** lc
+                elif lc == 4: # "nextint": read length
+                    membersize = buffer.read('I', 4)
+                else: # "also nextint": peek length
+                    lpos = buffer.tell()
+                    membersize = buffer.read('I', 4)
+                    buffer.seek(lpos)
+                    if lc == 6:
+                        membersize *= 4
+                    elif lc == 7:
+                        membersize *= 8
+                    # extra 4 bytes for length
+                    membersize += 4
+            else:
+                header = buffer.read('H', 2)
+                membersize = buffer.read('H', 2)
+                if (header & XCDR1.PL_SHORT_PID_MASK) == XCDR1.PL_SHORT_PID_LIST_END:
+                    break # sentinel ends XCDRv1 list
+                if (header & XCDR1.PL_SHORT_PID_MASK) == XCDR1.PL_SHORT_PID_EXTENDED:
+                    # long form; memberlen should be XCDR1.PL_SHORT_PID_EXT_LEN
+                    header = buffer.read('I', 4)
+                    membersize = buffer.read('I', 4)
+                    must_understand = ((header >> 30) & 1) > 0
+                    memberid = header & 0x0fffffff
+                else:
+                    must_understand = (header & XCDR1.PL_SHORT_FLAG_MU) > 0
+                    memberid = (header & XCDR1.PL_SHORT_PID_MASK)
+                    if (header & XCDR1.PL_SHORT_FLAG_IMPL_EXT) > 0:
+                        memberid ^= XCDR1.PL_SHORT_FLAG_IMPL_EXT | XCDR1.PL_LONG_FLAG_IMPL_EXT
+
+            mutmem = self.mutmem_by_id.get(memberid)
+
+            mpos = buffer.tell()
+            if mutmem:
+                m_key_enabled = self.key_enabled(mutmem, key_enabled)
+                if deserialize_kind == DeserializeKind.DataSample or m_key_enabled != KeyEnabled.Never:
+                    if not self.use_version_2:
+                        old_align_offset = buffer.set_align_offset(buffer.tell())
+                    data[mutmem.name] = mutmem.machine.deserialize(buffer, deserialize_kind, m_key_enabled)
+                    if not self.use_version_2:
+                        buffer.set_align_offset(old_align_offset)
+            else:
+                if must_understand:
+                    # Got a member that we don't know and marked as must understand: failure
+                    raise MustUnderstandFailure()
+            buffer.seek(mpos + membersize)
+
+        for mutmem in self.mutablemembers:
+            if data[mutmem.name] is None and mutmem.key:
+                raise KeyFieldNotProvidedFailure()
+            if data[mutmem.name] is None and not mutmem.optional:
+                data[mutmem.name] = mutmem.machine.default_initialize()
+
+        if self.use_version_2:
+            buffer.seek(hpos + struct_size)
+        return self.type(**data)
+
+    def key_scan(self) -> KeyScanner:
+        scan = KeyScanner()
+
+        for m_id in sorted(self.mutmem_by_id.keys()):
+            mutablemember = self.mutmem_by_id[m_id]
+            if not mutablemember.key:
+                continue
+            scan.increase_by_multiplied_subresult(mutablemember.machine.key_scan(), 1)
+
+        return scan
+
+    def cdr_key_machine_op(self, skip):
+        if skip:
+            # This sub-struct contains nothing interesting, we can skip it
+            return [CdrKeyVmOp(CdrKeyVMOpType.StructHeader, skip=skip, size=0, value=0, align=4)]
+
+        ret = []
+        for m_id in sorted(self.mutmem_by_id.keys()):
+            mutmem = self.mutmem_by_id[m_id]
+            if mutmem.key:
+                ret += [
+                    CdrKeyVmOp(CdrKeyVMOpType.MemberSelect, False, 0, m_id, 4)
+                ] + mutmem.machine.cdr_key_machine_op(False) + [
+                    CdrKeyVmOp(CdrKeyVMOpType.MemberSelectEnd, False, 0, m_id, 4)
+                ]
+
+        # position sample cursor at end of struct by 'skipping' from struct header
+        ret += [CdrKeyVmOp(CdrKeyVMOpType.StructHeader, skip=True, size=0, value=0, align=4)]
+
+        return ret
+
+    def default_initialize(self):
+        data = {}
+        for mutmem in self.mutablemembers:
+            if not mutmem.optional:
+                data[mutmem.name] = mutmem.machine.default_initialize()
+            else:
+                data[mutmem.name] = None
+        return self.type(**data)
+
+
+class BitMaskMachine(Machine):
+    def __init__(self, type, bit_bound=64):
+        self.bit_bound = bit_bound
+        self.type = type
+        self.primitive_type = \
+            types.uint8 if bit_bound < 9 else \
+            types.uint16 if bit_bound < 17 else \
+            types.uint32 if bit_bound < 33 else \
+            types.uint64
+        self.code, self.alignment, self.size, self.default = \
+            types._type_code_align_size_default_mapping[self.primitive_type]
+
+    def serialize(self, buffer, value, serialize_kind=SerializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(self.alignment)
+        buffer.write(self.code, self.size, value.as_mask())
+
+    def deserialize(self, buffer, deserialize_kind=DeserializeKind.DataSample, key_enabled=KeyEnabled.InKeylist):
+        buffer.align(self.alignment)
+        return self.type.from_mask(buffer.read(self.code, self.size))
+
+    def key_scan(self) -> KeyScanner:
+        return KeyScanner.simple(self.alignment, self.size)
+
+    def cdr_key_machine_op(self, skip):
+        stream = [CdrKeyVmOp(CdrKeyVMOpType.StreamStatic, skip, self.size, align=self.alignment)]
+        if not skip and not self.size == 1:
+            # Note: in the byteswap op the align field indicates the byteswap size
+            #       so the align=size is right, it is weird, agreed.
+            stream += [CdrKeyVmOp(CdrKeyVMOpType.ByteSwap, skip, align=self.size)]
+        return stream
+
+    def default_initialize(self):
+        return self.default

@@ -1,0 +1,102 @@
+// NatNetDDS.idl
+//
+// DDS data model used by the NatNet -> DDS bridge (NatNetToDDS.py).
+//
+// This file is the language-neutral source of truth. The Python bridge
+// defines the same types in natnet_dds/types_rti.py (RTI Connext) and
+// natnet_dds/types_cyclone.py (Eclipse Cyclone DDS). To consume the stream
+// from C, C++, Java, C#, etc. generate code from this file, e.g.:
+//
+//     rtiddsgen -language C++11 -example x64Win64VS2017 NatNetDDS.idl
+//
+// Units / conventions follow Motive's streaming settings:
+//   * positions in meters (Motive default), right-handed, Y-up by default
+//   * orientation is a unit quaternion (x, y, z, w)
+//
+// All types are @final so the wire layout is plain XCDR and interoperates
+// between DDS vendors without any XTypes negotiation surprises.
+
+module NatNet {
+
+    @final
+    struct Vector3 {
+        float x;
+        float y;
+        float z;
+    };
+
+    @final
+    struct Quaternion {
+        float x;
+        float y;
+        float z;
+        float w;
+    };
+
+    // Pose of a rigid body (or a skeleton bone) within a frame.
+    @final
+    struct RigidBodyPose {
+        long id;
+        string name;               // from Motive data descriptions ("" if unknown)
+        Vector3 position;
+        Quaternion orientation;
+        float mean_error;          // mean marker error (meters)
+        boolean tracking_valid;
+    };
+
+    @final
+    struct Skeleton {
+        long id;
+        string name;
+        sequence<RigidBodyPose> bones;
+    };
+
+    @final
+    struct MarkerSet {
+        string name;
+        sequence<Vector3> markers;
+    };
+
+    @final
+    struct LabeledMarker {
+        long id;                   // raw NatNet id: (model_id << 16) | marker_id
+        long model_id;             // owning asset id (0 = unlabeled / point cloud)
+        long marker_id;
+        Vector3 position;
+        float size;
+        boolean occluded;
+        float residual;            // millimeters
+    };
+
+    // Topic "NatNet_FrameOfMocapData": one sample per Motive frame.
+    @final
+    struct FrameOfMocapData {
+        long frame_number;
+        double timestamp;          // seconds since Motive started
+        unsigned long timecode;
+        unsigned long timecode_sub;
+        long long stamp_camera_mid_exposure;   // high-res clock ticks
+        long long stamp_data_received;
+        long long stamp_transmit;
+        boolean is_recording;
+        boolean tracked_models_changed;
+        sequence<RigidBodyPose> rigid_bodies;
+        sequence<Skeleton> skeletons;
+        sequence<LabeledMarker> labeled_markers;
+        sequence<MarkerSet> marker_sets;
+    };
+
+    // Topic "NatNet_RigidBody": keyed by id, so every rigid body is its own
+    // DDS instance. Convenient for consumers that only care about one body.
+    @final
+    struct RigidBody {
+        @key long id;
+        string name;
+        long frame_number;
+        double timestamp;
+        Vector3 position;
+        Quaternion orientation;
+        float mean_error;
+        boolean tracking_valid;
+    };
+};
