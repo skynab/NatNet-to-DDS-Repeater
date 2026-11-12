@@ -23,7 +23,8 @@ from tkinter import messagebox, ttk
 from DDSTestClient import FlowMonitor, MockVerifier
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
 from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, MetricsPanel,
-                                   RigidBodyTable, command_line, labeled, parse_window, stats_texts)
+                                   RigidBodyTable, Section, command_line, labeled, merge_settings, parse_window,
+                                   stats_texts)
 from natnet_dds.i18n import load_saved_language, tr
 from natnet_dds.metrics import DEFAULT_WINDOW_S, format_utc_ns
 
@@ -98,13 +99,16 @@ class ClientApp:
         self.failures_shown = 0
         self.top = None
         self._stopping = False   # True between pressing Stop and the readers closing
-        root.minsize(760, 600)
+        root.minsize(760, 300)
 
         cfg = dict(DEFAULTS)
+        self.collapsed = set()      # keys of collapsed sections, remembered between runs
         try:
             with open(SETTINGS_FILE) as f:
-                cfg.update({k: v for k, v in json.load(f).items() if k in DEFAULTS})
-        except (OSError, ValueError):
+                saved = json.load(f)
+            cfg.update({k: v for k, v in saved.items() if k in DEFAULTS})
+            self.collapsed = set(saved.get("collapsed", []))
+        except (OSError, ValueError, TypeError):
             pass
         self.v = {
             "dds": tk.StringVar(value=cfg["dds"]),
@@ -132,8 +136,9 @@ class ClientApp:
         top.pack(fill="both", expand=True)
         top.columnconfigure(0, weight=1)
 
-        sf = ttk.LabelFrame(top, text=tr("client.dds_group"), padding=8)
-        sf.grid(row=0, column=0, sticky="we", **pad)
+        sec = self._section(top, "dds", tr("client.dds_group"), 8)
+        sec.grid(row=0, column=0, sticky="we", **pad)
+        sf = sec.body
         self.dds_combo = labeled(sf, 0, tr("common.implementation"), ttk.Combobox(
             sf, textvariable=self.v["dds"], state="readonly", values=("auto", "rti", "cyclone"), width=10))
         self.domain_spin = labeled(sf, 0, tr("common.domain_id"), ttk.Spinbox(
@@ -158,8 +163,9 @@ class ClientApp:
         ttk.Button(bf, text=tr("client.reset"), command=self._reset).pack(side="left", padx=8)
         LanguagePicker(bf, self._on_language).pack(side="right")
 
-        stf = ttk.LabelFrame(top, text=tr("common.status"), padding=8)
-        stf.grid(row=2, column=0, sticky="we", **pad)
+        sec = self._section(top, "status", tr("common.status"), 8)
+        sec.grid(row=2, column=0, sticky="we", **pad)
+        stf = sec.body
         for i in range(4):
             stf.columnconfigure(i, weight=1, uniform="lamp")
         self.lamp_dds = Lamp(stf, tr("client.lamp_dds"))
@@ -170,8 +176,9 @@ class ClientApp:
             lamp.grid(row=0, column=i, sticky="nw", padx=4)
             lamp.set(IDLE, tr("common.stopped"))
 
-        mf = ttk.LabelFrame(top, text=tr("metrics.group"), padding=8)
-        mf.grid(row=3, column=0, sticky="we", **pad)
+        sec = self._section(top, "metrics", tr("metrics.group"), 8)
+        sec.grid(row=3, column=0, sticky="we", **pad)
+        mf = sec.body
         self.metrics = MetricsPanel(mf, [
             ("rate", tr("metrics.rate")),
             ("interval", tr("metrics.interval")),
@@ -182,19 +189,22 @@ class ClientApp:
         ], columns=(FRAME_TOPIC, RIGID_BODY_TOPIC))
         self.metrics.pack(fill="x")
 
-        ff = ttk.LabelFrame(top, text=tr("client.latest_frame", topic=FRAME_TOPIC), padding=6)
-        ff.grid(row=4, column=0, sticky="we", **pad)
+        sec = self._section(top, "frame", tr("client.latest_frame", topic=FRAME_TOPIC), 6)
+        sec.grid(row=4, column=0, sticky="we", **pad)
+        ff = sec.body
         self.frame_info = ttk.Label(ff, text="—", font=("TkFixedFont", 10), justify="left")
         self.frame_info.pack(anchor="w")
 
-        rf = ttk.LabelFrame(top, text=tr("client.rigid_bodies_group", topic=RIGID_BODY_TOPIC), padding=4)
-        rf.grid(row=5, column=0, sticky="nsew", **pad)
+        sec = self._section(top, "rigid_bodies", tr("client.rigid_bodies_group", topic=RIGID_BODY_TOPIC), 4)
+        sec.grid(row=5, column=0, sticky="nsew", **pad)
+        rf = sec.body
         top.rowconfigure(5, weight=1)
         self.table = RigidBodyTable(rf, height=5)
         self.table.pack(fill="both", expand=True)
 
-        lf = ttk.LabelFrame(top, text=tr("common.log"), padding=4)
-        lf.grid(row=6, column=0, sticky="nsew", **pad)
+        sec = self._section(top, "log", tr("common.log"), 4)
+        sec.grid(row=6, column=0, sticky="nsew", **pad)
+        lf = sec.body
         top.rowconfigure(6, weight=1)
         self.log = LogPane(lf, height=5)
         self.log.pack(fill="both", expand=True)
@@ -259,6 +269,14 @@ class ClientApp:
             pass
         self.cmdline.set(command_line("DDSTestClient.py", args))
 
+    def _section(self, parent, key, title, padding):
+        return Section(parent, title, key, expanded=key not in self.collapsed,
+                       on_toggle=self._on_section_toggle, padding=padding)
+
+    def _on_section_toggle(self, key, expanded):
+        (self.collapsed.discard if expanded else self.collapsed.add)(key)
+        merge_settings(SETTINGS_FILE, {"collapsed": sorted(self.collapsed)})
+
     def _copy_cmdline(self):
         self.root.clipboard_clear()
         self.root.clipboard_append(self.cmdline.get())
@@ -277,11 +295,7 @@ class ClientApp:
         except ValueError as e:
             messagebox.showerror(tr("common.invalid_setting"), str(e), parent=self.root)
             return
-        try:
-            with open(SETTINGS_FILE, "w") as f:
-                json.dump(cfg, f, indent=2)
-        except OSError:
-            pass
+        merge_settings(SETTINGS_FILE, cfg)
         self.table.clear()
         self.frame_info.configure(text="—")
         self.metrics.clear()

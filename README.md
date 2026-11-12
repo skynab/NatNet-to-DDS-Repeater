@@ -124,6 +124,8 @@ Fill in the settings and press **Start**. Each window has four status lights, on
 
 Below the lights, a **Metrics** panel shows the [metrics](#metrics) described above. The test client shows one column per topic.
 
+Click a section's title (▾) to collapse it to a single line, and click it again (▸) to expand it. The other sections take the freed space, and each window remembers which sections were collapsed.
+
 When a light is amber or red, its text suggests what to check, for example the transmission type or the DDS domain. Below the lights, each window shows the live rigid body poses and a log. At the bottom is the equivalent command line, which you can copy into a script.
 
 **Language:** use the **Language** menu at the top right of either window to switch between English and 简体中文. The window updates right away, even while it is running, and both windows remember the choice. The text comes from JSON files in [locales/](locales/). See [locales/README.md](locales/README.md) to edit a translation or add a language.

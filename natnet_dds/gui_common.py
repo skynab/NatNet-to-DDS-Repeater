@@ -2,6 +2,7 @@
 
 Tkinter ships with Python, so the GUIs need no extra packages.
 """
+import json
 import queue
 import socket
 import sys
@@ -183,6 +184,75 @@ class RigidBodyTable(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
 
 
+class Section(ttk.LabelFrame):
+    """A LabelFrame whose title collapses and expands its contents.
+
+    Put child widgets in `section.body`, not in the section itself. Click the
+    title (or focus it with Tab and press Space/Return) to toggle. When
+    collapsed, the section gives up its grid row's stretch so the other
+    sections can use the space. on_toggle(key, expanded) is called after a
+    toggle, e.g. to remember the state.
+    """
+
+    def __init__(self, master, title, key=None, expanded=True, on_toggle=None, padding=8):
+        self._title = title
+        self._header = ttk.Label(master, cursor="hand2", takefocus=1)
+        super().__init__(master, labelwidget=self._header)
+        self.key = key
+        self._padding = padding
+        self._on_toggle = on_toggle
+        self._expanded = True
+        self._grid_saved = None     # (row weight, sticky) while collapsed
+        self.body = ttk.Frame(self, padding=padding)
+        self.body.pack(fill="both", expand=True)
+        # Packed in place of the body while collapsed, so the frame shrinks
+        # to its title (Tk keeps a frame's old size when it has no children).
+        self._stub = ttk.Frame(self, height=0)
+        for seq in ("<Button-1>", "<space>", "<Return>"):
+            self._header.bind(seq, lambda _e: self.toggle())
+        self._update_header()
+        if not expanded:
+            # Collapse once gridded, so the row can be released.
+            self.after_idle(lambda: self.set_expanded(False, notify=False))
+
+    @property
+    def expanded(self):
+        return self._expanded
+
+    def toggle(self):
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded, notify=True):
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        info = self.grid_info()
+        if expanded:
+            self._stub.pack_forget()
+            self.body.pack(fill="both", expand=True)
+            if info and self._grid_saved:
+                weight, sticky = self._grid_saved
+                self.master.rowconfigure(info["row"], weight=weight)
+                self.grid_configure(sticky=sticky)
+            self._grid_saved = None
+        else:
+            self.body.pack_forget()
+            self._stub.pack(fill="x")
+            if info:
+                self._grid_saved = (self.master.rowconfigure(info["row"])["weight"], info["sticky"])
+                if not any(isinstance(w, Section) and w is not self and w.expanded
+                           and w.grid_info().get("row") == info["row"]
+                           for w in self.master.grid_slaves()):
+                    self.master.rowconfigure(info["row"], weight=0)
+                self.grid_configure(sticky=info["sticky"].replace("s", ""))
+        self._update_header()
+        if notify and self._on_toggle:
+            self._on_toggle(self.key, expanded)
+
+    def _update_header(self):
+        self._header.configure(text=("▾ " if self._expanded else "▸ ") + self._title)
+
+
 class MetricsPanel(ttk.Frame):
     """Grid of metric rows: a title column plus one value column per stream.
 
@@ -278,3 +348,21 @@ def parse_window(text):
     except ValueError:
         raise ValueError(tr("metrics.err_window"))
     return value
+
+
+def merge_settings(path, updates):
+    """Update keys in a JSON settings file, keeping the keys already there."""
+    data = {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        pass
+    data.update(updates)
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass

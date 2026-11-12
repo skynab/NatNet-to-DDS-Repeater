@@ -24,8 +24,8 @@ from tkinter import messagebox, ttk
 import NatNetToDDS as nn
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
 from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, MetricsPanel,
-                                   RigidBodyTable, command_line, labeled, local_ipv4_addresses, parse_window,
-                                   stats_texts)
+                                   RigidBodyTable, Section, command_line, labeled, local_ipv4_addresses,
+                                   merge_settings, parse_window, stats_texts)
 from natnet_dds.i18n import load_saved_language, tr
 from natnet_dds.metrics import DEFAULT_WINDOW_S, format_utc_ns
 
@@ -163,13 +163,16 @@ class BridgeApp:
         self.mock = None
         self.last_error_shown = None
         self.top = None
-        root.minsize(760, 640)
+        root.minsize(760, 300)
 
         cfg = dict(DEFAULTS)
+        self.collapsed = set()      # keys of collapsed sections, remembered between runs
         try:
             with open(SETTINGS_FILE) as f:
-                cfg.update({k: v for k, v in json.load(f).items() if k in DEFAULTS})
-        except (OSError, ValueError):
+                saved = json.load(f)
+            cfg.update({k: v for k, v in saved.items() if k in DEFAULTS})
+            self.collapsed = set(saved.get("collapsed", []))
+        except (OSError, ValueError, TypeError):
             pass
 
         self.v = {
@@ -208,8 +211,9 @@ class BridgeApp:
         top.columnconfigure(1, weight=1)
 
         # NatNet settings
-        nf = ttk.LabelFrame(top, text=tr("bridge.natnet_group"), padding=8)
-        nf.grid(row=0, column=0, sticky="nsew", **pad)
+        sec = self._section(top, "natnet", tr("bridge.natnet_group"), 8)
+        sec.grid(row=0, column=0, sticky="nsew", **pad)
+        nf = sec.body
         nf.columnconfigure(1, weight=1)
         self.settings_widgets = []
         w = labeled(nf, 0, tr("bridge.server_ip"), ttk.Entry(nf, textvariable=self.v["server"], width=18))
@@ -237,8 +241,9 @@ class BridgeApp:
                   foreground="#666666").grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # DDS settings
-        df = ttk.LabelFrame(top, text=tr("bridge.dds_group"), padding=8)
-        df.grid(row=0, column=1, sticky="nsew", **pad)
+        sec = self._section(top, "dds", tr("bridge.dds_group"), 8)
+        sec.grid(row=0, column=1, sticky="nsew", **pad)
+        df = sec.body
         df.columnconfigure(1, weight=1)
         self.dds_combo = labeled(df, 0, tr("common.implementation"), ttk.Combobox(
             df, textvariable=self.v["dds"], state="readonly", values=("auto", "rti", "cyclone"), width=10))
@@ -271,8 +276,9 @@ class BridgeApp:
         LanguagePicker(bf, self._on_language).pack(side="right")
 
         # Status
-        sf = ttk.LabelFrame(top, text=tr("common.status"), padding=8)
-        sf.grid(row=2, column=0, columnspan=2, sticky="we", **pad)
+        sec = self._section(top, "status", tr("common.status"), 8)
+        sec.grid(row=2, column=0, columnspan=2, sticky="we", **pad)
+        sf = sec.body
         for i in range(4):
             sf.columnconfigure(i, weight=1, uniform="lamp")
         self.lamp_natnet = Lamp(sf, tr("bridge.lamp_natnet"))
@@ -284,8 +290,9 @@ class BridgeApp:
             lamp.set(IDLE, tr("common.stopped"))
 
         # Metrics (NatNet input)
-        mf = ttk.LabelFrame(top, text=tr("metrics.group"), padding=8)
-        mf.grid(row=3, column=0, columnspan=2, sticky="we", **pad)
+        sec = self._section(top, "metrics", tr("metrics.group"), 8)
+        sec.grid(row=3, column=0, columnspan=2, sticky="we", **pad)
+        mf = sec.body
         self.metrics = MetricsPanel(mf, [
             ("rate", tr("metrics.rate")),
             ("interval", tr("metrics.interval")),
@@ -299,15 +306,17 @@ class BridgeApp:
         self.metrics.pack(fill="x")
 
         # Rigid bodies
-        rf = ttk.LabelFrame(top, text=tr("bridge.rigid_bodies_group"), padding=4)
-        rf.grid(row=4, column=0, columnspan=2, sticky="nsew", **pad)
+        sec = self._section(top, "rigid_bodies", tr("bridge.rigid_bodies_group"), 4)
+        sec.grid(row=4, column=0, columnspan=2, sticky="nsew", **pad)
+        rf = sec.body
         top.rowconfigure(4, weight=1)
         self.table = RigidBodyTable(rf, height=6)
         self.table.pack(fill="both", expand=True)
 
         # Log + command line
-        lf = ttk.LabelFrame(top, text=tr("common.log"), padding=4)
-        lf.grid(row=5, column=0, columnspan=2, sticky="nsew", **pad)
+        sec = self._section(top, "log", tr("common.log"), 4)
+        sec.grid(row=5, column=0, columnspan=2, sticky="nsew", **pad)
+        lf = sec.body
         top.rowconfigure(5, weight=1)
         self.log = LogPane(lf, height=6)
         self.log.pack(fill="both", expand=True)
@@ -382,11 +391,15 @@ class BridgeApp:
         return cfg
 
     def _save_settings(self, cfg):
-        try:
-            with open(SETTINGS_FILE, "w") as f:
-                json.dump(cfg, f, indent=2)
-        except OSError:
-            pass
+        merge_settings(SETTINGS_FILE, cfg)
+
+    def _section(self, parent, key, title, padding):
+        return Section(parent, title, key, expanded=key not in self.collapsed,
+                       on_toggle=self._on_section_toggle, padding=padding)
+
+    def _on_section_toggle(self, key, expanded):
+        (self.collapsed.discard if expanded else self.collapsed.add)(key)
+        merge_settings(SETTINGS_FILE, {"collapsed": sorted(self.collapsed)})
 
     def _update_cmdline(self):
         g = self.v
