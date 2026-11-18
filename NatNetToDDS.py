@@ -39,6 +39,7 @@ Examples
 """
 import argparse
 import os
+import socket
 import sys
 import threading
 import time
@@ -46,11 +47,48 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "natnet_sdk"))
 
+import MoCapData  # noqa: E402  (NatNet SDK frame data classes)
 from NatNetClient import NatNetClient  # noqa: E402  (NatNet SDK sample client)
 
 from natnet_dds import (FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX, RIGID_BODY_TOPIC,  # noqa: E402
                         create_backend, split_topic_names)
 from natnet_dds.metrics import DEFAULT_WINDOW_S, StreamStats, fmt, format_utc_ns  # noqa: E402
+
+
+class _NoCopy:
+    """Stands in for the copy module inside the SDK's MoCapData.
+
+    MoCapData's add_*() methods deep-copy every item they store: each marker,
+    rigid body and bone, and whole marker sets again after their markers were
+    already copied. The SDK decoder builds a new object for every item and
+    never touches it again, so the copies only cost time: more than half of
+    the decode time per frame. Skipping them makes decoding 2.5-3x faster.
+    Only MoCapData (frame data) is affected; the SDK files stay unmodified."""
+
+    @staticmethod
+    def deepcopy(obj, memo=None):
+        return obj
+
+
+MoCapData.copy = _NoCopy
+
+# The SDK leaves the data socket's receive buffer at the OS default, which can
+# hold only a few dozen frames (Windows: about 64 KB). Any pause in this
+# process then drops NatNet packets. Ask for room for a second or more of
+# frames instead; the OS may grant less.
+RECEIVE_BUFFER_BYTES = 4 * 1024 * 1024
+
+
+def set_receive_buffer(sock, size=RECEIVE_BUFFER_BYTES):
+    """Enlarge a socket's receive buffer, halving the request until the OS
+    accepts it. Returns the size the OS reports."""
+    while size >= 256 * 1024:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, size)
+            break
+        except OSError:
+            size //= 2
+    return sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
 
 
 def _to_str(value):
@@ -70,6 +108,8 @@ class BridgeNatNetClient(NatNetClient):
     * The arrival time of each packet is recorded (packet_received_ns) and
       the server's high-resolution clock frequency, which the stock client
       skips, is read from the server info (clock_frequency).
+    * The data socket gets a larger receive buffer (RECEIVE_BUFFER_BYTES), so
+      short pauses in the bridge don't drop packets.
 
     Everything else (sockets, handshake, version negotiation, unpacking) is
     the unmodified SDK code.
@@ -80,6 +120,7 @@ class BridgeNatNetClient(NatNetClient):
         self.data_descriptions_listener = None
         self.packet_received_ns = None   # wall clock (ns since UNIX epoch) of the packet being processed
         self.clock_frequency = None      # Motive's high-res clock ticks per second
+        self.receive_buffer_bytes = None  # data socket receive buffer granted by the OS
 
     # Overrides NatNetClient.__process_message (name-mangled private method).
     # It runs on the SDK's receive thread right after recvfrom().
@@ -102,6 +143,16 @@ class BridgeNatNetClient(NatNetClient):
             return message_id
 
         return super()._NatNetClient__process_message(data, print_level)
+
+    # Overrides NatNetClient.__create_data_socket to enlarge the receive buffer.
+    def _NatNetClient__create_data_socket(self):
+        sock = super()._NatNetClient__create_data_socket()
+        self.receive_buffer_bytes = set_receive_buffer(sock)
+        print("[natnet] receive buffer %d KB%s" % (
+            self.receive_buffer_bytes // 1024,
+            "" if self.receive_buffer_bytes >= RECEIVE_BUFFER_BYTES
+            else " (asked for %d KB; the OS limits it)" % (RECEIVE_BUFFER_BYTES // 1024)))
+        return sock
 
     # Overrides NatNetClient.__unpack_server_info to also read the
     # high-resolution clock frequency that follows the version numbers

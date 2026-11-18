@@ -195,12 +195,35 @@ Subscribe to the topic names above and the generated code works with this bridge
 
 ## How the bridge uses the SDK
 
-`NatNetToDDS.py` uses the SDK's `NatNetClient` as is for sockets, the connect handshake, NatNet version negotiation and packet decoding. It subclasses the client to add two hooks:
+`NatNetToDDS.py` uses the SDK's `NatNetClient` as is for sockets, the connect handshake, NatNet version negotiation and packet decoding. The SDK files are unmodified. The bridge subclasses the client and changes these things:
 
 - **Data descriptions:** the stock client only prints them. The subclass passes them to the bridge, which uses them for names.
 - **Per-frame printing:** the stock client prints a console line for every frame, which slows high frame rates. The subclass decodes frames without that print.
+- **No deep copies:** the SDK's `MoCapData` classes deep-copy every marker, rigid body and bone as it is stored, and copy whole marker sets a second time. The decoder never reuses those objects, so the bridge turns the copies off for `MoCapData`. Decoding is 3–4× faster as a result.
+- **Receive buffer:** the bridge asks the OS for a 4 MB receive buffer on the NatNet data socket instead of the OS default. A short pause in the bridge then delays frames instead of dropping them. It logs the size it got, for example `[natnet] receive buffer 4096 KB`.
+- **Timing:** it records when each packet arrived and reads Motive's clock frequency (see [Metrics](#metrics)).
 
 Each decoded `MoCapData` frame is converted to the DDS types and written.
+
+## Performance
+
+The bridge handles each frame on one thread: decoding the NatNet packet, converting it, and writing it to DDS. The highest rate it can sustain therefore depends on how much is in each frame and on the speed of one CPU core. When frames come in faster than it can handle them, the receive buffer fills up and the bridge reports lost frames under **Packet loss**.
+
+Measured on an Apple M1 Pro with Cyclone DDS. Expect lower numbers on a slower CPU.
+
+| Scene | Time per frame | Highest rate |
+|---|---|---|
+| Mock server (3 rigid bodies, 3 markers) | 0.2 ms | ~5,000 Hz |
+| 10 rigid bodies, 50 markers | 1.1 ms (0.6 ms with `--no-frames`) | ~850 Hz (~1,500 Hz) |
+| 20 rigid bodies, 2 skeletons, 160 markers | 3.5 ms | ~290 Hz |
+
+To go faster:
+
+- **Publish only what you use.** `NatNet_FrameOfMocapData` carries every marker, twice (in the marker sets and as labeled markers), and costs about three times as much to write as `NatNet_RigidBody`. If you only need rigid bodies, use `--no-frames` or untick it in the window.
+- **Stream less from Motive.** Turn off marker and skeleton data in Motive's streaming settings if you don't need them. The bridge then has less to decode.
+- **Use RTI Connext if you can.** Cyclone's Python package serializes samples in Python. RTI's does it in compiled code, but its speed hasn't been measured here.
+
+**Testing on a Mac:** macOS delivers multicast sent to its own address (`127.0.0.1`) at only about 180 packets per second, whatever the rate. To test rates above that on one Mac, use unicast: `--unicast` on the mock server and the bridge, or **Unicast** in the bridge window. macOS also won't send UDP packets larger than about 9 KB, so the mock can't stream large scenes there.
 
 ## Notes
 
