@@ -20,7 +20,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from DDSTestClient import FlowMonitor, MockVerifier
+from DDSTestClient import FlowMonitor, MockVerifier, SplitRigidBodyReaders
 from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
 from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, MetricsPanel,
                                    RigidBodyTable, Section, command_line, labeled, merge_settings, parse_window,
@@ -56,10 +56,14 @@ class ClientSession:
             T = self.backend.types
             frame_reader = self.backend.create_reader(FRAME_TOPIC, T.FrameOfMocapData, depth=256)
             rb_reader = self.backend.create_reader(RIGID_BODY_TOPIC, T.RigidBody, depth=64)
-            verifier = MockVerifier(c["mock_fps"]) if c["verify_mock"] else None
-            self.monitor = FlowMonitor(frame_reader, rb_reader, verifier, c["stats_window"])
             print("[dds] %s domain %d, subscribed to %s and %s" % (
                 self.backend.name, c["domain"], FRAME_TOPIC, RIGID_BODY_TOPIC))
+            # If the bridge splits rigid bodies, they arrive on <name>_pos and
+            # <name>_orientation instead: subscribe to those for every rigid
+            # body seen on the frame topic.
+            split_readers = SplitRigidBodyReaders(self.backend)
+            verifier = MockVerifier(c["mock_fps"]) if c["verify_mock"] else None
+            self.monitor = FlowMonitor(frame_reader, rb_reader, verifier, c["stats_window"], split_readers)
         except Exception as e:  # noqa: BLE001 - show anything that goes wrong
             self.error = str(e) or repr(e)
             self.state = "error"
@@ -118,6 +122,7 @@ class ClientApp:
             "stats_window": tk.StringVar(value="%g" % cfg["stats_window"]),
         }
         self.cmdline = tk.StringVar()
+        self.rb_topic_label = RIGID_BODY_TOPIC
         self._build()
         for var in self.v.values():
             var.trace_add("write", lambda *_: self._update_cmdline())
@@ -186,7 +191,7 @@ class ClientApp:
             ("latency", tr("client.metric_latency")),
             ("source_ts", tr("client.metric_source_ts")),
             ("motive_times", tr("metrics.motive_times")),
-        ], columns=(FRAME_TOPIC, RIGID_BODY_TOPIC))
+        ], columns=(FRAME_TOPIC, self.rb_topic_label))
         self.metrics.pack(fill="x")
 
         sec = self._section(top, "frame", tr("client.latest_frame", topic=FRAME_TOPIC), 6)
@@ -195,7 +200,8 @@ class ClientApp:
         self.frame_info = ttk.Label(ff, text="—", font=("TkFixedFont", 10), justify="left")
         self.frame_info.pack(anchor="w")
 
-        sec = self._section(top, "rigid_bodies", tr("client.rigid_bodies_group", topic=RIGID_BODY_TOPIC), 4)
+        sec = self._section(top, "rigid_bodies", tr("client.rigid_bodies_group", topic=self.rb_topic_label), 4)
+        self.rb_section = sec
         sec.grid(row=5, column=0, sticky="nsew", **pad)
         rf = sec.body
         top.rowconfigure(5, weight=1)
@@ -231,6 +237,14 @@ class ClientApp:
                 w.configure(state="readonly" if enabled else "disabled")
             else:
                 w.configure(state="normal" if enabled else "disabled")
+
+    def _set_rb_topic_label(self, label):
+        """Rigid bodies arrive on NatNet_RigidBody or on split topics, as the
+        bridge chooses; the headings name the one in use."""
+        if label != self.rb_topic_label:
+            self.rb_topic_label = label
+            self.metrics.set_heading(1, label)
+            self.rb_section.set_title(tr("client.rigid_bodies_group", topic=label))
 
     def _on_language(self, _code):
         log_text = self.log.get_text()
@@ -315,7 +329,7 @@ class ClientApp:
             m = s.monitor
             fresh = FlowMonitor(m.frame_reader, m.rb_reader,
                                 MockVerifier(s.cfg["mock_fps"]) if m.verifier else None,
-                                s.cfg["stats_window"])
+                                s.cfg["stats_window"], m.split_readers)
             s.monitor = fresh
         self.failures_shown = 0
         self.table.clear()
@@ -363,6 +377,8 @@ class ClientApp:
             f = m.latest_frame
             rbs = list(m.latest_rbs.values())
             stale = {i for i, t in m.rb_last_seen.items() if now - t > STALE_S}
+            split_rows = list(m.latest_split.items()) if m.split else None
+            stale_topics = {t for t, seen in m.split_last_seen.items() if now - seen > STALE_S}
             if not rbs and f:   # bridge started with --no-rigid-bodies: use the frame topic
                 rbs = list(f.rigid_bodies)
                 stale = {rb.id for rb in rbs} if last is None or now - last > STALE_S else set()
@@ -375,12 +391,16 @@ class ClientApp:
             frame_stats, rb_stats = m.frame_stats.snapshot(), m.rb_stats.snapshot()
             frame_source_ns, rb_source_ns = m.latest_frame_source_ns, m.latest_rb_source_ns
             latest_rb = max(m.latest_rbs.values(), key=lambda r: r.frame_number, default=None)
+            rb_label = m.rigid_body_topic_label()
 
         # 1. participant
         self.lamp_dds.set(OK, tr("common.backend_domain", backend=s.backend.name, domain=c["domain"]))
 
         # 2. publishers
-        detail = tr("client.pubs_counts", frame=matched[0], rigid_body=matched[1])
+        split = matched[2] and not matched[1]   # the bridge splits rigid bodies
+        detail = tr("client.pubs_counts_split" if split else "client.pubs_counts",
+                    frame=matched[0], rigid_body=matched[2] if split else matched[1])
+        self._set_rb_topic_label(rb_label)
         if any(matched):
             self.lamp_pubs.set(OK, detail)
         else:
@@ -422,7 +442,10 @@ class ClientApp:
 
         if frame_text:
             self.frame_info.configure(text=frame_text)
-        self.table.update_rows(rbs, stale_ids=stale)
+        if split_rows is not None:   # one row per <name>_pos / <name>_orientation topic
+            self.table.update_split_rows(split_rows, stale_topics)
+        else:
+            self.table.update_rows(rbs, stale_ids=stale)
 
         # metrics, one column per topic
         for col, st, received, source_ns in ((0, frame_stats, frames, frame_source_ns),

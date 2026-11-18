@@ -159,19 +159,43 @@ class RigidBodyTable(ttk.Frame):
         self.tree.pack(fill="both", expand=True)
 
     def update_rows(self, bodies, stale_ids=()):
-        """bodies: iterable of objects with id, name, position, orientation,
-        mean_error and tracking_valid (RigidBodyPose or RigidBody)."""
-        seen = set()
+        """One row per rigid body. bodies: iterable of objects with id, name,
+        position, orientation, mean_error and tracking_valid (RigidBodyPose or
+        RigidBody)."""
+        rows = []
         for rb in sorted(bodies, key=lambda r: r.id):
-            iid = str(rb.id)
-            seen.add(iid)
             p, q = rb.position, rb.orientation
-            stale = rb.id in stale_ids
-            values = (rb.id, rb.name or "?", "%.4f" % p.x, "%.4f" % p.y, "%.4f" % p.z,
-                      "%.4f" % q.x, "%.4f" % q.y, "%.4f" % q.z, "%.4f" % q.w,
-                      "%.2f" % (rb.mean_error * 1000.0),
-                      tr("table.stale") if stale else tr("table.tracked" if rb.tracking_valid else "table.lost"))
-            tags = ("stale",) if stale else (() if rb.tracking_valid else ("lost",))
+            rows.append((str(rb.id), rb.id, rb.name or "?", (p.x, p.y, p.z), (q.x, q.y, q.z, q.w),
+                         rb.mean_error, rb.tracking_valid, rb.id in stale_ids))
+        self._show(rows, "table.name")
+
+    def update_split_rows(self, samples, stale_topics=()):
+        """One row per split topic, so a rigid body's position and orientation
+        show as the separate objects they are. samples: iterable of (topic,
+        sample), each sample with id, name, tracking_valid and either position
+        and mean_error (<name>_pos) or orientation (<name>_orientation)."""
+        rows = []
+        for topic, s in sorted(samples, key=lambda ts: (ts[1].id, not hasattr(ts[1], "position"), ts[0])):
+            if hasattr(s, "position"):
+                pos, rot, err = (s.position.x, s.position.y, s.position.z), None, s.mean_error
+            else:
+                q = s.orientation
+                pos, rot, err = None, (q.x, q.y, q.z, q.w), None
+            rows.append(("topic:" + topic, s.id, topic, pos, rot, err, s.tracking_valid, topic in stale_topics))
+        self._show(rows, "table.topic")
+
+    def _show(self, rows, name_heading):
+        """rows: (iid, id, name, position or None, orientation or None,
+        mean error or None, tracking valid, stale)"""
+        self.tree.heading("name", text=tr(name_heading))
+        seen = set()
+        for iid, rb_id, name, pos, rot, err, valid, stale in rows:
+            seen.add(iid)
+            values = ((rb_id, name) + (tuple("%.4f" % v for v in pos) if pos else ("",) * 3)
+                      + (tuple("%.4f" % v for v in rot) if rot else ("",) * 4)
+                      + ("%.2f" % (err * 1000.0) if err is not None else "",
+                         tr("table.stale") if stale else tr("table.tracked" if valid else "table.lost")))
+            tags = ("stale",) if stale else (() if valid else ("lost",))
             if self.tree.exists(iid):
                 self.tree.item(iid, values=values, tags=tags)
             else:
@@ -249,6 +273,10 @@ class Section(ttk.LabelFrame):
         if notify and self._on_toggle:
             self._on_toggle(self.key, expanded)
 
+    def set_title(self, title):
+        self._title = title
+        self._update_header()
+
     def _update_header(self):
         self._header.configure(text=("▾ " if self._expanded else "▸ ") + self._title)
 
@@ -263,10 +291,12 @@ class MetricsPanel(ttk.Frame):
         self._values = {}
         n_cols = len(columns) if columns else 1
         first = 0
+        self._headings = []
         if columns:
             for c, heading in enumerate(columns):
-                ttk.Label(self, text=heading, font=("TkDefaultFont", 0, "bold")).grid(
-                    row=0, column=1 + c, sticky="w", padx=(0, 16))
+                lbl = ttk.Label(self, text=heading, font=("TkDefaultFont", 0, "bold"))
+                lbl.grid(row=0, column=1 + c, sticky="w", padx=(0, 16))
+                self._headings.append(lbl)
             first = 1
         for r, (key, title) in enumerate(rows):
             ttk.Label(self, text=title, foreground="#555555").grid(
@@ -280,6 +310,9 @@ class MetricsPanel(ttk.Frame):
 
     def set(self, key, text, column=0):
         self._values[(key, column)].configure(text=text)
+
+    def set_heading(self, column, text):
+        self._headings[column].configure(text=text)
 
     def clear(self):
         for lbl in self._values.values():

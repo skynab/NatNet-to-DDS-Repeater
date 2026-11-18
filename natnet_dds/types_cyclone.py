@@ -96,3 +96,28 @@ class RigidBody(IdlStruct, typename="NatNet::RigidBody"):
     orientation: Quaternion = field(default_factory=Quaternion)
     mean_error: float32 = 0.0
     tracking_valid: bool = False
+
+
+# Split mode (NatNetToDDS.py --split-rigid-bodies): every rigid body gets two
+# topics of its own, "<name>_pos" and "<name>_orientation".
+@final
+@dataclass
+class RigidBodyPosition(IdlStruct, typename="NatNet::RigidBodyPosition"):
+    id: int32 = 0
+    name: str = ""
+    frame_number: int32 = 0
+    timestamp: float64 = 0.0
+    position: Vector3 = field(default_factory=Vector3)
+    mean_error: float32 = 0.0
+    tracking_valid: bool = False
+
+
+@final
+@dataclass
+class RigidBodyOrientation(IdlStruct, typename="NatNet::RigidBodyOrientation"):
+    id: int32 = 0
+    name: str = ""
+    frame_number: int32 = 0
+    timestamp: float64 = 0.0
+    orientation: Quaternion = field(default_factory=Quaternion)
+    tracking_valid: bool = False

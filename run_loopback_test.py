@@ -7,6 +7,7 @@ Exits 0 if every frame arrived over DDS with the exact values the mock sent.
 
     python run_loopback_test.py
     python run_loopback_test.py --unicast --fps 240 --dds cyclone
+    python run_loopback_test.py --split-rigid-bodies
 """
 import argparse
 import os
@@ -23,19 +24,22 @@ def main():
     p.add_argument("--fps", type=float, default=120.0)
     p.add_argument("--dds", default="auto", choices=["auto", "rti", "cyclone"])
     p.add_argument("--domain", type=int, default=0)
+    p.add_argument("--split-rigid-bodies", action="store_true",
+                   help="test the separate <name>_pos / <name>_orientation rigid body topics")
     p.add_argument("--seconds", type=float, default=5.0, help="how long the test client listens")
     args = p.parse_args()
 
     py = [sys.executable, "-u"]
     cast = ["--unicast"] if args.unicast else []
     dds = ["--dds", args.dds, "--domain", str(args.domain)]
+    split = ["--split-rigid-bodies"] if args.split_rigid_bodies else []   # the client follows on its own
 
     mock = subprocess.Popen(py + [os.path.join(HERE, "MockNatNetServer.py"), "--fps", str(args.fps)] + cast)
     bridge = None
     try:
         time.sleep(1.0)
         bridge = subprocess.Popen(py + [os.path.join(HERE, "NatNetToDDS.py"),
-                                        "--duration", str(args.seconds + 4)] + cast + dds)
+                                        "--duration", str(args.seconds + 4)] + cast + dds + split)
         time.sleep(2.0)
         result = subprocess.call(py + [os.path.join(HERE, "DDSTestClient.py"), "--quiet", "--verify-mock",
                                        "--mock-fps", str(args.fps), "--duration", str(args.seconds)] + dds)

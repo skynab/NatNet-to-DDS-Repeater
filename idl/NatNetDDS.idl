@@ -99,4 +99,31 @@ module NatNet {
         float mean_error;
         boolean tracking_valid;
     };
+
+    // Split mode (NatNetToDDS.py --split-rigid-bodies): instead of
+    // "NatNet_RigidBody", every rigid body gets two topics of its own, named
+    // after it: "<name>_pos" (RigidBodyPosition) and "<name>_orientation"
+    // (RigidBodyOrientation). A rigid body named "basketball" is published on
+    // "basketball_pos" and "basketball_orientation". Characters other than
+    // letters, digits and '_' in the name become '_'.
+    @final
+    struct RigidBodyPosition {
+        long id;
+        string name;
+        long frame_number;
+        double timestamp;          // seconds since Motive started
+        Vector3 position;
+        float mean_error;          // mean marker error (meters)
+        boolean tracking_valid;
+    };
+
+    @final
+    struct RigidBodyOrientation {
+        long id;
+        string name;
+        long frame_number;
+        double timestamp;
+        Quaternion orientation;
+        boolean tracking_valid;
+    };
 };

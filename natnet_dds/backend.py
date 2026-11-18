@@ -12,10 +12,33 @@ Both speak the standard OMG DDS-RTPS wire protocol and use identical type
 definitions (see idl/NatNetDDS.idl), so a bridge on one vendor can feed
 subscribers on the other.
 """
+import re
 import sys
 
 FRAME_TOPIC = "NatNet_FrameOfMocapData"
 RIGID_BODY_TOPIC = "NatNet_RigidBody"
+
+# Split mode: one pair of topics per rigid body, "<name>_pos" and "<name>_orientation".
+POSITION_SUFFIX = "_pos"
+ORIENTATION_SUFFIX = "_orientation"
+
+
+def split_topic_base(name, rb_id):
+    """The rigid body part of its split topic names. DDS topic names may only
+    use letters, digits and '_', so other characters become '_'. A name with
+    no letters or digits at all (e.g. unnamed, or not in Latin script) gives
+    "RigidBody_<id>"."""
+    base = re.sub(r"[^A-Za-z0-9_]", "_", (name or "").strip())
+    if not re.search(r"[A-Za-z0-9]", base):
+        return "RigidBody_%d" % rb_id
+    return "_" + base if base[0].isdigit() else base
+
+
+def split_topic_names(name, rb_id):
+    """(position topic, orientation topic) of one rigid body in split mode,
+    e.g. "basketball" -> ("basketball_pos", "basketball_orientation")."""
+    base = split_topic_base(name, rb_id)
+    return base + POSITION_SUFFIX, base + ORIENTATION_SUFFIX
 
 
 class _RtiBackend:
@@ -77,6 +100,9 @@ class _RtiWriter:
 
     def matched_count(self):
         return len(self._w.matched_subscriptions)
+
+    def close(self):
+        self._w.close()
 
 
 class _RtiReader:
@@ -150,6 +176,9 @@ class _CycloneWriter:
 
     def matched_count(self):
         return len(self._w.get_matched_subscriptions())
+
+    def close(self):
+        self._w = None   # Cyclone deletes the writer when it is garbage collected
 
 
 class _CycloneReader:

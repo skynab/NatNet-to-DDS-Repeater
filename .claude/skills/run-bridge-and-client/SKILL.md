@@ -66,6 +66,9 @@ For that, the bridge's server and local interface must be `127.0.0.1`.
   - `--stats-window N` sets the metrics window (both apps).
   - `MockNatNetServer.py --drop-every 60` makes the mock skip frames, to exercise the loss metrics.
   - `--fps 240` changes the mock's frame rate.
+  - `--split-rigid-bodies` on the bridge (or **Publish rigid bodies → position and orientation separately** in its window) publishes each rigid body's position and orientation separately, on `<name>_pos` and `<name>_orientation`.
+    The client has no setting for this; it picks up the split topics on its own.
+    `run_loopback_test.py --split-rigid-bodies` tests that path.
 
 **One-shot end-to-end test:** `.venv/bin/python run_loopback_test.py` starts mock → bridge → client, checks the data, and exits. Run it with Bash, not in a tab.
 

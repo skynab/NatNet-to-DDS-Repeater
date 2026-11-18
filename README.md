@@ -91,7 +91,7 @@ Both programs, and both windows, report the following. Rate, interval, packet lo
 |---|---|---|
 | **Data rate** | Frames per second arriving from Motive, and the rate according to Motive's own frame timestamps ("at source") | Samples per second arriving over DDS, and the source rate |
 | **Arrival interval** | Mean, standard deviation and max time between frames (jitter) | Same, measured at the client |
-| **Packet loss** | Gaps in Motive frame numbers in the window (with %), since start, and out-of-order frames. Loss here happened between Motive and the bridge. | Same. On `NatNet_RigidBody`, gaps are counted per rigid body, so one lost frame with 3 bodies counts 3. Loss seen here but not on the bridge happened in DDS. |
+| **Packet loss** | Gaps in Motive frame numbers in the window (with %), since start, and out-of-order frames. Loss here happened between Motive and the bridge. | Same. On `NatNet_RigidBody`, gaps are counted per rigid body, so one lost frame with 3 bodies counts 3. In split mode they are counted per topic, so it counts 6. Loss seen here but not on the bridge happened in DDS. |
 | **Latency** | *Motive latency:* camera mid-exposure → Motive transmit, from Motive's hardware clock. *Bridge processing:* NatNet packet received → DDS write finished. | DDS source timestamp → sample taken by the client. It includes up to one 5 ms polling interval of the client, and it is only meaningful when the bridge and client clocks are synchronized (same machine, or NTP/PTP). |
 | **Source timestamps** | Motive's frame timestamp (`t`, seconds since Motive started), the mid-exposure and transmit stamps (ticks), Motive's clock frequency, and the DDS source timestamp | The DDS source timestamp of the latest sample on each topic, and Motive's timestamps carried in the sample |
 
@@ -144,6 +144,12 @@ To test the unicast path at a higher frame rate:
 python run_loopback_test.py --unicast --fps 240
 ```
 
+To test the separate position and orientation topics (see [DDS topics](#dds-topics)):
+
+```bash
+python run_loopback_test.py --split-rigid-bodies
+```
+
 The mock server streams 3 rigid bodies, a 3-bone skeleton, labeled markers and a marker set. It also answers the NatNet handshake, model-definition requests and commands. Every value is a pure function of the frame number. With `--verify-mock`, the test client checks every received field (poses, ids, names, tracking flags, markers, timestamps) against those functions, so a PASS means the data went NatNet → bridge → DDS unchanged. You can also run the three programs in separate terminals:
 
 ```bash
@@ -164,6 +170,16 @@ python DDSTestClient.py --verify-mock
 |---|---|---|
 | `NatNet_FrameOfMocapData` | `NatNet::FrameOfMocapData` | One sample per Motive frame: frame number, timestamps, timecode, recording flag, rigid bodies, skeletons (with bones), labeled markers, marker sets |
 | `NatNet_RigidBody` | `NatNet::RigidBody` (`@key id`) | One sample per rigid body per frame, with each body as its own DDS instance. Use this topic when you only need rigid body poses. |
+| `<name>_pos` | `NatNet::RigidBodyPosition` | Split mode only, one topic per rigid body: its position, mean error and tracking flag, one sample per frame |
+| `<name>_orientation` | `NatNet::RigidBodyOrientation` | Split mode only, one topic per rigid body: its orientation quaternion and tracking flag, one sample per frame |
+
+**Split mode:** start the bridge with `--split-rigid-bodies`, or choose **Publish rigid bodies → position and orientation separately** in the bridge window. Each rigid body's position and orientation are then published as separate objects, on two topics named after the rigid body, instead of on `NatNet_RigidBody`. For example, a rigid body named `basketball` is published on `basketball_pos` and `basketball_orientation`.
+
+- Every sample carries the rigid body's id, name, frame number and Motive timestamp. The position and orientation samples from one frame share the same frame number and DDS source timestamp, so a consumer can pair them up.
+- DDS topic names can only contain letters, digits and `_`, so other characters in the name become `_`. For example, `my ball` becomes `my_ball_pos`.
+- A rigid body whose name has no Latin letters or digits at all is published as `RigidBody_<id>_pos` and `RigidBody_<id>_orientation`. The bridge prints the topics it creates for each rigid body.
+- The bridge creates a rigid body's topics when that body first appears. If you rename a rigid body in Motive, its data moves to topics with the new name.
+- Only the bridge has this setting. The test client, in the window or on the command line, follows on its own: for every rigid body it sees on `NatNet_FrameOfMocapData`, it subscribes to `<name>_pos` and `<name>_orientation` as well as `NatNet_RigidBody`. Its rigid body table and metrics then show whichever form arrives. If the bridge doesn't publish `NatNet_FrameOfMocapData`, the client can't learn the names, so list them with `DDSTestClient.py --rigid-body-names basketball,Rocket`.
 
 The full definitions are in [idl/NatNetDDS.idl](idl/NatNetDDS.idl). Positions are in meters (Motive's default) and orientations are quaternions (x, y, z, w). Rigid body, skeleton and bone names come from Motive's data descriptions. The bridge requests them on connect and again whenever Motive reports that the tracked models changed.
 

@@ -13,6 +13,14 @@ SDK's Samples/PythonClient) and republishes every frame on DDS:
       One sample per rigid body per frame. Each rigid body is its own DDS
       instance, so subscribers can filter/track bodies individually.
 
+  With --split-rigid-bodies, NatNet_RigidBody is replaced by two topics per
+  rigid body, named after it:
+
+  Topic "<name>_pos"               type NatNet::RigidBodyPosition
+  Topic "<name>_orientation"       type NatNet::RigidBodyOrientation
+      e.g. a rigid body named "basketball" is published on "basketball_pos"
+      and "basketball_orientation".
+
 Types are defined in idl/NatNetDDS.idl. Works with RTI Connext DDS, or with
 Eclipse Cyclone DDS when no RTI license is available (see --dds).
 
@@ -25,6 +33,9 @@ Examples
 
     # DDS domain 5, force RTI Connext
     python NatNetToDDS.py --domain 5 --dds rti
+
+    # position and orientation of each rigid body on topics of their own
+    python NatNetToDDS.py --split-rigid-bodies
 """
 import argparse
 import os
@@ -37,7 +48,8 @@ sys.path.insert(0, os.path.join(HERE, "natnet_sdk"))
 
 from NatNetClient import NatNetClient  # noqa: E402  (NatNet SDK sample client)
 
-from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend  # noqa: E402
+from natnet_dds import (FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX, RIGID_BODY_TOPIC,  # noqa: E402
+                        create_backend, split_topic_names)
 from natnet_dds.metrics import DEFAULT_WINDOW_S, StreamStats, fmt, format_utc_ns  # noqa: E402
 
 
@@ -112,16 +124,48 @@ class BridgeNatNetClient(NatNetClient):
                           (self.server_ip_address, self.command_port))
 
 
+class SplitTopics:
+    """The two split-mode writers of one rigid body."""
+
+    def __init__(self, backend, types, name, rb_id, reliable, taken_topics):
+        self.name = name
+        pos_topic, ori_topic = split_topic_names(name, rb_id)
+        if pos_topic in taken_topics:   # two names that differ only in replaced characters
+            pos_topic, ori_topic = split_topic_names(pos_topic[:-len(POSITION_SUFFIX)] + "_%d" % rb_id, rb_id)
+        self.position_topic, self.orientation_topic = pos_topic, ori_topic
+        self.position_writer = backend.create_writer(pos_topic, types.RigidBodyPosition, reliable)
+        self.orientation_writer = backend.create_writer(ori_topic, types.RigidBodyOrientation, reliable)
+
+    def matched_counts(self):
+        return self.position_writer.matched_count(), self.orientation_writer.matched_count()
+
+    def close(self):
+        self.position_writer.close()
+        self.orientation_writer.close()
+
+
 class NatNetToDDSBridge:
     """Converts SDK MoCapData frames to DDS samples and writes them."""
 
+    # Split mode names topics after rigid bodies. Names come from Motive's data
+    # descriptions shortly after connecting; wait this long for them before
+    # falling back to "RigidBody_<id>".
+    NAME_WAIT_S = 2.0
+
     def __init__(self, backend, publish_frames=True, publish_rigid_bodies=True, reliable=False,
-                 stats_window_s=DEFAULT_WINDOW_S):
+                 stats_window_s=DEFAULT_WINDOW_S, split_rigid_bodies=False):
         self.types = backend.types
+        self.backend = backend
+        self.reliable = reliable
         self.frame_writer = (backend.create_writer(FRAME_TOPIC, self.types.FrameOfMocapData, reliable)
                              if publish_frames else None)
+        # Rigid bodies go either to one keyed topic, or (split mode) to a
+        # "<name>_pos" and a "<name>_orientation" topic per rigid body.
+        self.split_rigid_bodies = bool(publish_rigid_bodies and split_rigid_bodies)
         self.rigid_body_writer = (backend.create_writer(RIGID_BODY_TOPIC, self.types.RigidBody, reliable)
-                                  if publish_rigid_bodies else None)
+                                  if publish_rigid_bodies and not self.split_rigid_bodies else None)
+        self.split_topics = {}          # rigid body id -> SplitTopics, created as bodies appear
+        self._first_frame_time = None
 
         # Names from Motive data descriptions
         self.rigid_body_names = {}      # rigid body id -> name
@@ -181,10 +225,36 @@ class NatNetToDDSBridge:
             mean_error=rb.error,
             tracking_valid=bool(rb.tracking_valid))
 
+    def _split_topics_for(self, pose):
+        """SplitTopics for a rigid body, created the first time it is seen.
+        None while its name may still be on its way."""
+        topics = self.split_topics.get(pose.id)
+        if topics and topics.name == pose.name:
+            return topics
+        if (not pose.name and not self.descriptions_received.is_set()
+                and time.monotonic() - self._first_frame_time < self.NAME_WAIT_S):
+            return None
+        if topics:  # renamed in Motive: move to topics with the new name
+            topics.close()
+            del self.split_topics[pose.id]
+        taken = {t.position_topic for t in self.split_topics.values()}
+        topics = SplitTopics(self.backend, self.types, pose.name, pose.id, self.reliable, taken)
+        self.split_topics[pose.id] = topics
+        print("[dds] rigid body %d %s: publishing %s and %s" % (
+            pose.id, pose.name or "(no name)", topics.position_topic, topics.orientation_topic))
+        return topics
+
+    def split_subscriber_counts(self):
+        """(split topics with at least one subscriber, split topics)"""
+        counts = [n for t in list(self.split_topics.values()) for n in t.matched_counts()]
+        return sum(1 for n in counts if n), len(counts)
+
     def _publish(self, mocap, received_ns, clock_frequency):
         T = self.types
         suffix = mocap.suffix_data
         frame_number = mocap.prefix_data.frame_number
+        if self._first_frame_time is None:
+            self._first_frame_time = time.monotonic()
 
         rigid_bodies = [self._pose(rb, self.rigid_body_names.get(rb.id_num, ""))
                         for rb in mocap.rigid_body_data.rigid_body_list]
@@ -236,6 +306,20 @@ class NatNetToDDSBridge:
                     timestamp=float(suffix.timestamp), position=p.position,
                     orientation=p.orientation, mean_error=p.mean_error,
                     tracking_valid=p.tracking_valid), received_ns)
+
+        if self.split_rigid_bodies:
+            timestamp = float(suffix.timestamp)
+            for p in rigid_bodies:
+                topics = self._split_topics_for(p)
+                if topics is None:
+                    continue
+                topics.position_writer.write(T.RigidBodyPosition(
+                    id=p.id, name=p.name, frame_number=frame_number, timestamp=timestamp,
+                    position=p.position, mean_error=p.mean_error,
+                    tracking_valid=p.tracking_valid), received_ns)
+                topics.orientation_writer.write(T.RigidBodyOrientation(
+                    id=p.id, name=p.name, frame_number=frame_number, timestamp=timestamp,
+                    orientation=p.orientation, tracking_valid=p.tracking_valid), received_ns)
 
         self.processing_stats.record(frame_number, latency_s=(time.time_ns() - received_ns) / 1e9)
         self.frames_published += 1
@@ -314,7 +398,11 @@ def parse_args():
     p.add_argument("--reliable", action="store_true",
                    help="use RELIABLE writers (default BEST_EFFORT, typical for streaming sensor data)")
     p.add_argument("--no-frames", action="store_true", help=f"don't publish {FRAME_TOPIC}")
-    p.add_argument("--no-rigid-bodies", action="store_true", help=f"don't publish {RIGID_BODY_TOPIC}")
+    p.add_argument("--no-rigid-bodies", action="store_true", help="don't publish rigid bodies on their own topics")
+    p.add_argument("--split-rigid-bodies", action="store_true",
+                   help=f"publish each rigid body's position and orientation as separate objects, on topics "
+                        f"named after it (<name>{POSITION_SUFFIX} and <name>{ORIENTATION_SUFFIX}), "
+                        f"instead of {RIGID_BODY_TOPIC}")
     p.add_argument("--stats-window", type=float, default=DEFAULT_WINDOW_S,
                    help="seconds of history used for rate, jitter and packet loss (default %(default)s)")
     p.add_argument("--duration", type=float, default=0, help="exit after N seconds (0 = run until Ctrl+C)")
@@ -344,13 +432,15 @@ def main():
     args = parse_args()
 
     backend = create_backend(args.dds, args.domain)
-    print("[dds] using %s, domain %d, topics: %s%s" % (
-        backend.name, args.domain,
-        "" if args.no_frames else FRAME_TOPIC + " ",
-        "" if args.no_rigid_bodies else RIGID_BODY_TOPIC))
+    topics = [] if args.no_frames else [FRAME_TOPIC]
+    if not args.no_rigid_bodies:
+        topics.append("<name>%s and <name>%s per rigid body" % (POSITION_SUFFIX, ORIENTATION_SUFFIX)
+                      if args.split_rigid_bodies else RIGID_BODY_TOPIC)
+    print("[dds] using %s, domain %d, topics: %s" % (backend.name, args.domain, ", ".join(topics)))
     bridge = NatNetToDDSBridge(backend, publish_frames=not args.no_frames,
                                publish_rigid_bodies=not args.no_rigid_bodies,
-                               reliable=args.reliable, stats_window_s=args.stats_window)
+                               reliable=args.reliable, stats_window_s=args.stats_window,
+                               split_rigid_bodies=args.split_rigid_bodies)
 
     client, request_descriptions = create_natnet_client(
         bridge, args.server, args.client, args.multicast, args.multicast_address,
@@ -384,6 +474,8 @@ def main():
                 subs.append("frame subs %d" % bridge.frame_writer.matched_count())
             if bridge.rigid_body_writer:
                 subs.append("rigid body subs %d" % bridge.rigid_body_writer.matched_count())
+            if bridge.split_rigid_bodies:
+                subs.append("pos/orientation topics with subs %d of %d" % bridge.split_subscriber_counts())
             st = bridge.stats.snapshot()
             print("[bridge] frame %s  published %d  %s%s" % (
                 bridge.last_frame_number, bridge.frames_published, ", ".join(subs),
