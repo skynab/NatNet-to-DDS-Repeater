@@ -209,17 +209,19 @@ Each decoded `MoCapData` frame is converted to the DDS types and written.
 
 The bridge handles each frame on one thread: decoding the NatNet packet, converting it, and writing it to DDS. The highest rate it can sustain therefore depends on how much is in each frame and on the speed of one CPU core. When frames come in faster than it can handle them, the receive buffer fills up and the bridge reports lost frames under **Packet loss**.
 
-Measured on an Apple M1 Pro with Cyclone DDS. Expect lower numbers on a slower CPU.
+Measured end to end on an Apple M1 Pro with Cyclone DDS: the bridge on the command line, with the test client subscribed. "Highest rate" is the highest rate tested with no lost frames. Expect lower numbers on a slower CPU. The bridge window manages about 10–15% less, because the window shares the bridge's Python process.
 
-| Scene | Time per frame | Highest rate |
-|---|---|---|
-| Mock server (3 rigid bodies, 3 markers) | 0.2 ms | ~5,000 Hz |
-| 10 rigid bodies, 50 markers | 1.1 ms (0.6 ms with `--no-frames`) | ~850 Hz (~1,500 Hz) |
-| 20 rigid bodies, 2 skeletons, 160 markers | 3.5 ms | ~290 Hz |
+| Scene | What the bridge publishes | Time per frame | Highest rate |
+|---|---|---|---|
+| Mock server (3 rigid bodies, 3 markers) | Both topics | 0.3 ms | ~3,000 Hz |
+| 10 rigid bodies, 50 markers | Both topics | 1.3 ms | ~700 Hz |
+| 10 rigid bodies, 50 markers | Split rigid bodies + frame topic | 1.45 ms | ~600 Hz |
+| 10 rigid bodies, 50 markers | Split rigid bodies only (`--no-frames`) | 0.65 ms | ~1,000 Hz |
+| 20 rigid bodies, 2 skeletons, 160 markers | Both topics | 3.5 ms | ~290 Hz (estimate: these frames are too large to send on a Mac, see below) |
 
 To go faster:
 
-- **Publish only what you use.** `NatNet_FrameOfMocapData` carries every marker, twice (in the marker sets and as labeled markers), and costs about three times as much to write as `NatNet_RigidBody`. If you only need rigid bodies, use `--no-frames` or untick it in the window.
+- **Publish only what you use.** `NatNet_FrameOfMocapData` carries every marker, twice (in the marker sets and as labeled markers), and costs about three times as much to write as `NatNet_RigidBody`. If you only need rigid bodies, use `--no-frames` or untick it in the window. Split rigid bodies cost about 10% more than `NatNet_RigidBody`, because each rigid body becomes two DDS writes.
 - **Stream less from Motive.** Turn off marker and skeleton data in Motive's streaming settings if you don't need them. The bridge then has less to decode.
 - **Use RTI Connext if you can.** Cyclone's Python package serializes samples in Python. RTI's does it in compiled code, but its speed hasn't been measured here.
 
