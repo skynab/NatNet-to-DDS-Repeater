@@ -41,7 +41,7 @@ def main():
         bridge = subprocess.Popen(py + [os.path.join(HERE, "NatNetToDDS.py"),
                                         "--duration", str(args.seconds + 4)] + cast + dds + split)
         time.sleep(2.0)
-        result = subprocess.call(py + [os.path.join(HERE, "DDSTestClient.py"), "--quiet", "--verify-mock",
+        result = subprocess.call(py + [os.path.join(HERE, "DDSTestClient.py"), "--quiet", "--verify-mock", "--require-rigid-bodies",
                                        "--mock-fps", str(args.fps), "--duration", str(args.seconds)] + dds)
     finally:
         for proc in (bridge, mock):

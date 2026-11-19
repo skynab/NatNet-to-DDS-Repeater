@@ -21,6 +21,10 @@ SDK's Samples/PythonClient) and republishes every frame on DDS:
       e.g. a rigid body named "basketball" is published on "basketball_pos"
       and "basketball_orientation".
 
+  Every topic name starts with a prefix, "rt/basketball/" by default, e.g.
+  "rt/basketball/NatNet_FrameOfMocapData". Change it with --topic-prefix,
+  or leave it off with --no-topic-prefix.
+
 Types are defined in idl/NatNetDDS.idl. Works with RTI Connext DDS, or with
 Eclipse Cyclone DDS when no RTI license is available (see --dds).
 
@@ -50,8 +54,9 @@ sys.path.insert(0, os.path.join(HERE, "natnet_sdk"))
 import MoCapData  # noqa: E402  (NatNet SDK frame data classes)
 from NatNetClient import NatNetClient  # noqa: E402  (NatNet SDK sample client)
 
-from natnet_dds import (FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX, RIGID_BODY_TOPIC,  # noqa: E402
-                        create_backend, split_topic_names)
+from natnet_dds import (DEFAULT_TOPIC_PREFIX, FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX,  # noqa: E402
+                        RIGID_BODY_TOPIC, check_topic_prefix, create_backend, split_topic_names,
+                        topic_prefix_arg)
 from natnet_dds.metrics import DEFAULT_WINDOW_S, StreamStats, fmt, format_utc_ns  # noqa: E402
 
 
@@ -178,14 +183,15 @@ class BridgeNatNetClient(NatNetClient):
 class SplitTopics:
     """The two split-mode writers of one rigid body."""
 
-    def __init__(self, backend, types, name, rb_id, reliable, taken_topics):
+    def __init__(self, backend, types, name, rb_id, reliable, taken_topics, prefix=""):
         self.name = name
         pos_topic, ori_topic = split_topic_names(name, rb_id)
-        if pos_topic in taken_topics:   # two names that differ only in replaced characters
+        if prefix + pos_topic in taken_topics:   # two names that differ only in replaced characters
             pos_topic, ori_topic = split_topic_names(pos_topic[:-len(POSITION_SUFFIX)] + "_%d" % rb_id, rb_id)
-        self.position_topic, self.orientation_topic = pos_topic, ori_topic
-        self.position_writer = backend.create_writer(pos_topic, types.RigidBodyPosition, reliable)
-        self.orientation_writer = backend.create_writer(ori_topic, types.RigidBodyOrientation, reliable)
+        self.position_topic, self.orientation_topic = prefix + pos_topic, prefix + ori_topic
+        self.position_writer = backend.create_writer(self.position_topic, types.RigidBodyPosition, reliable)
+        self.orientation_writer = backend.create_writer(self.orientation_topic, types.RigidBodyOrientation,
+                                                        reliable)
 
     def matched_counts(self):
         return self.position_writer.matched_count(), self.orientation_writer.matched_count()
@@ -204,16 +210,20 @@ class NatNetToDDSBridge:
     NAME_WAIT_S = 2.0
 
     def __init__(self, backend, publish_frames=True, publish_rigid_bodies=True, reliable=False,
-                 stats_window_s=DEFAULT_WINDOW_S, split_rigid_bodies=False):
+                 stats_window_s=DEFAULT_WINDOW_S, split_rigid_bodies=False, topic_prefix=""):
         self.types = backend.types
         self.backend = backend
         self.reliable = reliable
-        self.frame_writer = (backend.create_writer(FRAME_TOPIC, self.types.FrameOfMocapData, reliable)
+        # Every topic name starts with this, e.g. "rt/basketball/".
+        self.topic_prefix = check_topic_prefix(topic_prefix)
+        self.frame_topic = topic_prefix + FRAME_TOPIC
+        self.rigid_body_topic = topic_prefix + RIGID_BODY_TOPIC
+        self.frame_writer = (backend.create_writer(self.frame_topic, self.types.FrameOfMocapData, reliable)
                              if publish_frames else None)
         # Rigid bodies go either to one keyed topic, or (split mode) to a
         # "<name>_pos" and a "<name>_orientation" topic per rigid body.
         self.split_rigid_bodies = bool(publish_rigid_bodies and split_rigid_bodies)
-        self.rigid_body_writer = (backend.create_writer(RIGID_BODY_TOPIC, self.types.RigidBody, reliable)
+        self.rigid_body_writer = (backend.create_writer(self.rigid_body_topic, self.types.RigidBody, reliable)
                                   if publish_rigid_bodies and not self.split_rigid_bodies else None)
         self.split_topics = {}          # rigid body id -> SplitTopics, created as bodies appear
         self._first_frame_time = None
@@ -289,7 +299,8 @@ class NatNetToDDSBridge:
             topics.close()
             del self.split_topics[pose.id]
         taken = {t.position_topic for t in self.split_topics.values()}
-        topics = SplitTopics(self.backend, self.types, pose.name, pose.id, self.reliable, taken)
+        topics = SplitTopics(self.backend, self.types, pose.name, pose.id, self.reliable, taken,
+                             self.topic_prefix)
         self.split_topics[pose.id] = topics
         print("[dds] rigid body %d %s: publishing %s and %s" % (
             pose.id, pose.name or "(no name)", topics.position_topic, topics.orientation_topic))
@@ -454,6 +465,11 @@ def parse_args():
                    help=f"publish each rigid body's position and orientation as separate objects, on topics "
                         f"named after it (<name>{POSITION_SUFFIX} and <name>{ORIENTATION_SUFFIX}), "
                         f"instead of {RIGID_BODY_TOPIC}")
+    prefix = p.add_mutually_exclusive_group()
+    prefix.add_argument("--topic-prefix", default=DEFAULT_TOPIC_PREFIX, type=topic_prefix_arg,
+                        help="text put in front of every topic name (default %(default)s)")
+    prefix.add_argument("--no-topic-prefix", dest="topic_prefix", action="store_const", const="",
+                        help="use the plain topic names, with no prefix")
     p.add_argument("--stats-window", type=float, default=DEFAULT_WINDOW_S,
                    help="seconds of history used for rate, jitter and packet loss (default %(default)s)")
     p.add_argument("--duration", type=float, default=0, help="exit after N seconds (0 = run until Ctrl+C)")
@@ -483,15 +499,16 @@ def main():
     args = parse_args()
 
     backend = create_backend(args.dds, args.domain)
-    topics = [] if args.no_frames else [FRAME_TOPIC]
+    pre = args.topic_prefix
+    topics = [] if args.no_frames else [pre + FRAME_TOPIC]
     if not args.no_rigid_bodies:
-        topics.append("<name>%s and <name>%s per rigid body" % (POSITION_SUFFIX, ORIENTATION_SUFFIX)
-                      if args.split_rigid_bodies else RIGID_BODY_TOPIC)
+        topics.append("%s<name>%s and %s<name>%s per rigid body" % (pre, POSITION_SUFFIX, pre, ORIENTATION_SUFFIX)
+                      if args.split_rigid_bodies else pre + RIGID_BODY_TOPIC)
     print("[dds] using %s, domain %d, topics: %s" % (backend.name, args.domain, ", ".join(topics)))
     bridge = NatNetToDDSBridge(backend, publish_frames=not args.no_frames,
                                publish_rigid_bodies=not args.no_rigid_bodies,
                                reliable=args.reliable, stats_window_s=args.stats_window,
-                               split_rigid_bodies=args.split_rigid_bodies)
+                               split_rigid_bodies=args.split_rigid_bodies, topic_prefix=args.topic_prefix)
 
     client, request_descriptions = create_natnet_client(
         bridge, args.server, args.client, args.multicast, args.multicast_address,

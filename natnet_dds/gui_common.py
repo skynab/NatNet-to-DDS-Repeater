@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
+from .backend import check_topic_prefix
 from .i18n import available_languages, current_language, save_language, tr
 
 # Status lamp colors
@@ -347,6 +348,29 @@ def labeled(parent, row, text, widget, column=0, **grid):
     ttk.Label(parent, text=text).grid(row=row, column=column, sticky="w", padx=(0, 6), pady=2)
     widget.grid(row=row, column=column + 1, sticky="we", pady=2, **grid)
     return widget
+
+
+def topic_prefix_row(parent, row, use_var, text_var, on_toggle=None, columnspan=2):
+    """"Prefix topic names with [text]": a checkbox and a text box on one
+    grid row. Returns (checkbox, entry)."""
+    f = ttk.Frame(parent)
+    f.grid(row=row, column=0, columnspan=columnspan, sticky="we", pady=1)
+    cb = ttk.Checkbutton(f, text=tr("common.topic_prefix"), variable=use_var, command=on_toggle)
+    cb.pack(side="left")
+    entry = ttk.Entry(f, textvariable=text_var, width=20)
+    entry.pack(side="left", padx=(6, 0))
+    return cb, entry
+
+
+def parse_topic_prefix(use, text):
+    """The prefix to use ("" when off). Raises ValueError with a translated
+    message if it contains characters DDS topic names can't."""
+    if not use:
+        return ""
+    try:
+        return check_topic_prefix(text.strip())
+    except ValueError:
+        raise ValueError(tr("common.err_prefix"))
 
 
 def command_line(script, args):

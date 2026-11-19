@@ -14,6 +14,9 @@ body seen on NatNet_FrameOfMocapData it subscribes to "<name>_pos" and
 the bridge publishes is what arrives. If the bridge doesn't publish the
 frame topic, name the rigid bodies with --rigid-body-names.
 
+Topic names start with the same prefix as the bridge's, "rt/basketball/" by
+default (--topic-prefix / --no-topic-prefix); it must match the bridge's.
+
 With --verify-mock (when the bridge is fed by MockNatNetServer.py) every
 received value is checked against the mock's known trajectories, so a pass
 means the data made it NatNet -> bridge -> DDS -> here unchanged.
@@ -37,8 +40,8 @@ import sys
 import time
 from types import SimpleNamespace
 
-from natnet_dds import (FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX, RIGID_BODY_TOPIC, create_backend,
-                        split_topic_names)
+from natnet_dds import (DEFAULT_TOPIC_PREFIX, FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX, RIGID_BODY_TOPIC,
+                        create_backend, split_topic_names, topic_prefix_arg)
 from natnet_dds.metrics import DEFAULT_WINDOW_S, StreamStats, fmt, format_utc_ns
 
 
@@ -57,10 +60,11 @@ def _close(a, b, tol=1e-6):
 class MockVerifier:
     """Checks samples against MockNatNetServer's deterministic scene."""
 
-    def __init__(self, fps):
+    def __init__(self, fps, topic_prefix=""):
         import MockNatNetServer as mock
         self.mock = mock
         self.fps = fps
+        self.topic_prefix = topic_prefix
         self.checks = 0
         self.failures = []
         self.named_frames = 0   # frames where names (from data descriptions) were present
@@ -135,7 +139,8 @@ class MockVerifier:
         is_pos = hasattr(sample, "position")
         self._check(abs(sample.timestamp - sample.frame_number / self.fps) < 1e-9,
                     "%s frame %d: timestamp %r" % (topic, sample.frame_number, sample.timestamp))
-        self._check(topic == split_topic_names(self.mock.RIGID_BODIES.get(sample.id, ""), sample.id)[0 if is_pos else 1],
+        self._check(topic == self.topic_prefix + split_topic_names(self.mock.RIGID_BODIES.get(sample.id, ""),
+                                                                    sample.id)[0 if is_pos else 1],
                     "%s: carries rigid body %d" % (topic, sample.id))
         self._check_pose(topic, sample.id, sample.frame_number,
                          _v3(sample.position) if is_pos else None,
@@ -147,15 +152,16 @@ class SplitRigidBodyReaders:
     """Readers for the split rigid body topics: "<name>_pos" and
     "<name>_orientation" for every rigid body name added."""
 
-    def __init__(self, backend, names=()):
+    def __init__(self, backend, names=(), topic_prefix=""):
         self.backend = backend
+        self.topic_prefix = topic_prefix
         self.readers = {}       # position topic -> [(topic, reader), (topic, reader)]
         for name in names:
             self.add(name)
 
     def add(self, name, rb_id=0):
         T = self.backend.types
-        pos_topic, ori_topic = split_topic_names(name, rb_id)
+        pos_topic, ori_topic = (self.topic_prefix + t for t in split_topic_names(name, rb_id))
         if pos_topic in self.readers:
             return
         self.readers[pos_topic] = [(pos_topic, self.backend.create_reader(pos_topic, T.RigidBodyPosition, depth=64)),
@@ -301,8 +307,9 @@ class FlowMonitor:
         return len(samples)
 
     def rigid_body_topic_label(self):
-        return ("<name>%s / <name>%s" % (POSITION_SUFFIX, ORIENTATION_SUFFIX) if self.split
-                else RIGID_BODY_TOPIC)
+        prefix = self.split_readers.topic_prefix if self.split_readers is not None else ""
+        return (prefix + "<name>%s / <name>%s" % (POSITION_SUFFIX, ORIENTATION_SUFFIX) if self.split
+                else prefix + RIGID_BODY_TOPIC)
 
     def matched_publishers(self):
         """(frame topic publishers, NatNet_RigidBody publishers, split topic publishers)"""
@@ -367,18 +374,27 @@ def main():
                    help=f"comma-separated rigid body names whose <name>{POSITION_SUFFIX} and "
                         f"<name>{ORIENTATION_SUFFIX} topics to read. Only needed when the bridge splits "
                         f"rigid bodies but doesn't publish {FRAME_TOPIC}; otherwise the names seen there are used.")
+    p.add_argument("--require-rigid-bodies", action="store_true",
+                   help="fail unless samples arrive on the rigid body topics too (used by run_loopback_test.py)")
+    prefix = p.add_mutually_exclusive_group()
+    prefix.add_argument("--topic-prefix", default=DEFAULT_TOPIC_PREFIX, type=topic_prefix_arg,
+                        help="text in front of every topic name; must match the bridge's (default %(default)s)")
+    prefix.add_argument("--no-topic-prefix", dest="topic_prefix", action="store_const", const="",
+                        help="the bridge publishes plain topic names, with no prefix")
     args = p.parse_args()
 
     backend = create_backend(args.dds, args.domain)
     T = backend.types
-    frame_reader = backend.create_reader(FRAME_TOPIC, T.FrameOfMocapData, depth=256)
-    rb_reader = backend.create_reader(RIGID_BODY_TOPIC, T.RigidBody, depth=64)
-    print("[dds] %s domain %d, subscribed to %s and %s, and to <name>%s / <name>%s of every rigid body "
+    pre = args.topic_prefix
+    frame_reader = backend.create_reader(pre + FRAME_TOPIC, T.FrameOfMocapData, depth=256)
+    rb_reader = backend.create_reader(pre + RIGID_BODY_TOPIC, T.RigidBody, depth=64)
+    print("[dds] %s domain %d, subscribed to %s and %s, and to %s<name>%s / %s<name>%s of every rigid body "
           "seen (for a bridge that splits rigid bodies)" % (
-              backend.name, args.domain, FRAME_TOPIC, RIGID_BODY_TOPIC, POSITION_SUFFIX, ORIENTATION_SUFFIX))
+              backend.name, args.domain, pre + FRAME_TOPIC, pre + RIGID_BODY_TOPIC,
+              pre, POSITION_SUFFIX, pre, ORIENTATION_SUFFIX))
     split_readers = SplitRigidBodyReaders(
-        backend, [n.strip() for n in args.rigid_body_names.split(",") if n.strip()])
-    verifier = MockVerifier(args.mock_fps) if args.verify_mock else None
+        backend, [n.strip() for n in args.rigid_body_names.split(",") if n.strip()], pre)
+    verifier = MockVerifier(args.mock_fps, pre) if args.verify_mock else None
 
     mon = FlowMonitor(frame_reader, rb_reader, verifier, args.stats_window, split_readers)
 
@@ -425,6 +441,9 @@ def main():
         for msg in verifier.failures[:10]:
             print("    " + msg)
     ok = mon.passed()
+    if args.require_rigid_bodies and not mon.rb_samples:
+        print("FAIL: no samples on the rigid body topics (%s)" % mon.rigid_body_topic_label())
+        ok = False
     print("RESULT: %s" % ("PASS" if ok else "FAIL"))
     backend.close()
     return 0 if ok else 1

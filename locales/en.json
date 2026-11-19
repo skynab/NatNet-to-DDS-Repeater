@@ -20,6 +20,8 @@
   "common.multicast": "multicast",
   "common.unicast": "unicast",
   "common.list_separator": ", ",
+  "common.topic_prefix": "Prefix topic names with",
+  "common.err_prefix": "The topic prefix can only contain letters, digits, _ and /.",
 
   "metrics.group": "Metrics",
   "metrics.window": "Metrics window (s)",
@@ -115,7 +117,7 @@
   "client.pubs_counts": "frame topic {frame}, rigid body topic {rigid_body}",
   "client.pubs_counts_split": "frame topic {frame}, position/orientation topics {rigid_body}",
   "client.discovering": "discovering…",
-  "client.no_bridge": "No bridge found. Is NatNetToDDS running on domain {domain}, and is multicast allowed between the machines?",
+  "client.no_bridge": "No bridge found. Is NatNetToDDS running on domain {domain} with the same topic prefix, and is multicast allowed between the machines?",
   "client.flow_ok": "{fps:.1f} fps\n{frames} frames, {rb_samples} rigid body samples",
   "client.flow_stopped": "no data for {seconds:.0f}s\n{frames} frames received",
   "client.flow_no_samples": "Publisher matched but no samples yet. Is the bridge receiving frames from Motive?",

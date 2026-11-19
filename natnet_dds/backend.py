@@ -18,6 +18,28 @@ import sys
 FRAME_TOPIC = "NatNet_FrameOfMocapData"
 RIGID_BODY_TOPIC = "NatNet_RigidBody"
 
+# Text put in front of every topic name, on by default. "rt/" is the prefix
+# ROS 2 gives its topics on DDS; turn it off (or change it) with --topic-prefix.
+DEFAULT_TOPIC_PREFIX = "rt/basketball/"
+
+
+def check_topic_prefix(prefix):
+    """Return prefix if it is usable in DDS topic names (letters, digits, '_'
+    and '/'), else raise ValueError."""
+    if not re.fullmatch(r"[A-Za-z0-9_/]*", prefix):
+        raise ValueError("topic prefix %r: use only letters, digits, '_' and '/'" % prefix)
+    return prefix
+
+
+def topic_prefix_arg(text):
+    """argparse type for --topic-prefix."""
+    import argparse
+    try:
+        return check_topic_prefix(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
 # Split mode: one pair of topics per rigid body, "<name>_pos" and "<name>_orientation".
 POSITION_SUFFIX = "_pos"
 ORIENTATION_SUFFIX = "_orientation"

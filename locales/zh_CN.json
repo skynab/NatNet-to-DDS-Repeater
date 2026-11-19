@@ -20,6 +20,8 @@
   "common.multicast": "组播",
   "common.unicast": "单播",
   "common.list_separator": "，",
+  "common.topic_prefix": "主题名称前缀",
+  "common.err_prefix": "主题前缀只能包含字母、数字、_ 和 /。",
 
   "metrics.group": "统计指标",
   "metrics.window": "统计窗口（秒）",
@@ -115,7 +117,7 @@
   "client.pubs_counts": "帧主题 {frame}，刚体主题 {rigid_body}",
   "client.pubs_counts_split": "帧主题 {frame}，位置/姿态主题 {rigid_body}",
   "client.discovering": "正在发现…",
-  "client.no_bridge": "未找到桥接。NatNetToDDS 是否在域 {domain} 上运行？机器之间是否允许组播？",
+  "client.no_bridge": "未找到桥接。NatNetToDDS 是否在域 {domain} 上运行，并使用相同的主题前缀？机器之间是否允许组播？",
   "client.flow_ok": "{fps:.1f} fps\n{frames} 帧，{rb_samples} 个刚体样本",
   "client.flow_stopped": "已 {seconds:.0f} 秒没有数据\n共收到 {frames} 帧",
   "client.flow_no_samples": "已匹配发布者，但尚未收到样本。桥接是否正在从 Motive 接收帧？",

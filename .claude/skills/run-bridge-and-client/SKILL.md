@@ -61,7 +61,8 @@ For that, the bridge's server and local interface must be `127.0.0.1`.
 
 - Drop `--verify-mock` when the source is real Motive.
 - For real Motive on another machine, pass these to the bridge: `--server <motive ip> --client <this pc ip>`, plus `--unicast` if Motive streams unicast.
-- Keep the same `--domain N` on both ends.
+- Keep the same `--domain N` on both ends, and the same topic prefix.
+  Both default to `rt/basketball/`; `--topic-prefix TEXT` or `--no-topic-prefix` changes it on each end.
 - Useful extras:
   - `--stats-window N` sets the metrics window (both apps).
   - `MockNatNetServer.py --drop-every 60` makes the mock skip frames, to exercise the loss metrics.

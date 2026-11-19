@@ -13,6 +13,10 @@
 //   * positions in meters (Motive default), right-handed, Y-up by default
 //   * orientation is a unit quaternion (x, y, z, w)
 //
+// Topic names: the bridge puts a prefix in front of every topic name below,
+// "rt/basketball/" by default (e.g. "rt/basketball/NatNet_RigidBody").
+// See --topic-prefix / --no-topic-prefix.
+//
 // All types are @final so the wire layout is plain XCDR and interoperates
 // between DDS vendors without any XTypes negotiation surprises.
 

@@ -21,16 +21,16 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from DDSTestClient import FlowMonitor, MockVerifier, SplitRigidBodyReaders
-from natnet_dds import FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
+from natnet_dds import DEFAULT_TOPIC_PREFIX, FRAME_TOPIC, RIGID_BODY_TOPIC, create_backend
 from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, MetricsPanel,
-                                   RigidBodyTable, Section, command_line, labeled, merge_settings, parse_window,
-                                   stats_texts)
+                                   RigidBodyTable, Section, command_line, labeled, merge_settings, parse_topic_prefix,
+                                   parse_window, stats_texts, topic_prefix_row)
 from natnet_dds.i18n import load_saved_language, tr
 from natnet_dds.metrics import DEFAULT_WINDOW_S, format_utc_ns
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".natnet_dds_client_gui.json")
 DEFAULTS = {"dds": "auto", "domain": 0, "verify_mock": False, "mock_fps": 120,
-            "stats_window": DEFAULT_WINDOW_S}
+            "stats_window": DEFAULT_WINDOW_S, "use_topic_prefix": True, "topic_prefix": DEFAULT_TOPIC_PREFIX}
 STALE_S = 1.0
 
 
@@ -54,15 +54,16 @@ class ClientSession:
         try:
             self.backend = create_backend(c["dds"], c["domain"])
             T = self.backend.types
-            frame_reader = self.backend.create_reader(FRAME_TOPIC, T.FrameOfMocapData, depth=256)
-            rb_reader = self.backend.create_reader(RIGID_BODY_TOPIC, T.RigidBody, depth=64)
+            pre = c["prefix"]
+            frame_reader = self.backend.create_reader(pre + FRAME_TOPIC, T.FrameOfMocapData, depth=256)
+            rb_reader = self.backend.create_reader(pre + RIGID_BODY_TOPIC, T.RigidBody, depth=64)
             print("[dds] %s domain %d, subscribed to %s and %s" % (
-                self.backend.name, c["domain"], FRAME_TOPIC, RIGID_BODY_TOPIC))
+                self.backend.name, c["domain"], pre + FRAME_TOPIC, pre + RIGID_BODY_TOPIC))
             # If the bridge splits rigid bodies, they arrive on <name>_pos and
             # <name>_orientation instead: subscribe to those for every rigid
             # body seen on the frame topic.
-            split_readers = SplitRigidBodyReaders(self.backend)
-            verifier = MockVerifier(c["mock_fps"]) if c["verify_mock"] else None
+            split_readers = SplitRigidBodyReaders(self.backend, topic_prefix=pre)
+            verifier = MockVerifier(c["mock_fps"], pre) if c["verify_mock"] else None
             self.monitor = FlowMonitor(frame_reader, rb_reader, verifier, c["stats_window"], split_readers)
         except Exception as e:  # noqa: BLE001 - show anything that goes wrong
             self.error = str(e) or repr(e)
@@ -120,9 +121,13 @@ class ClientApp:
             "verify_mock": tk.BooleanVar(value=cfg["verify_mock"]),
             "mock_fps": tk.StringVar(value=str(cfg["mock_fps"])),
             "stats_window": tk.StringVar(value="%g" % cfg["stats_window"]),
+            "use_topic_prefix": tk.BooleanVar(value=cfg["use_topic_prefix"]),
+            "topic_prefix": tk.StringVar(value=cfg["topic_prefix"]),
         }
         self.cmdline = tk.StringVar()
-        self.rb_topic_label = RIGID_BODY_TOPIC
+        # Prefix shown in the headings: the saved one until Start uses the form's.
+        self.shown_prefix = cfg["topic_prefix"] if cfg["use_topic_prefix"] else ""
+        self.rb_topic_label = self.shown_prefix + RIGID_BODY_TOPIC
         self._build()
         for var in self.v.values():
             var.trace_add("write", lambda *_: self._update_cmdline())
@@ -158,8 +163,10 @@ class ClientApp:
         ttk.Label(vf, text=tr("client.verify_hint"), foreground="#666666").pack(side="left", padx=4)
         self.window_spin = labeled(sf, 2, tr("metrics.window"), ttk.Spinbox(
             sf, from_=1, to=3600, textvariable=self.v["stats_window"], width=6))
+        self.prefix_cb, self.prefix_entry = topic_prefix_row(
+            sf, 3, self.v["use_topic_prefix"], self.v["topic_prefix"], on_toggle=self._sync_buttons, columnspan=4)
         self.settings_widgets = (self.dds_combo, self.domain_spin, self.verify_cb, self.fps_spin,
-                                 self.window_spin)
+                                 self.window_spin, self.prefix_cb, self.prefix_entry)
 
         bf = ttk.Frame(top)
         bf.grid(row=1, column=0, sticky="we", **pad)
@@ -191,10 +198,11 @@ class ClientApp:
             ("latency", tr("client.metric_latency")),
             ("source_ts", tr("client.metric_source_ts")),
             ("motive_times", tr("metrics.motive_times")),
-        ], columns=(FRAME_TOPIC, self.rb_topic_label))
+        ], columns=(self.shown_prefix + FRAME_TOPIC, self.rb_topic_label))
         self.metrics.pack(fill="x")
 
-        sec = self._section(top, "frame", tr("client.latest_frame", topic=FRAME_TOPIC), 6)
+        sec = self._section(top, "frame", tr("client.latest_frame", topic=self.shown_prefix + FRAME_TOPIC), 6)
+        self.frame_section = sec
         sec.grid(row=4, column=0, sticky="we", **pad)
         ff = sec.body
         self.frame_info = ttk.Label(ff, text="—", font=("TkFixedFont", 10), justify="left")
@@ -235,8 +243,17 @@ class ClientApp:
         for w in self.settings_widgets:
             if w is self.dds_combo:
                 w.configure(state="readonly" if enabled else "disabled")
+            elif w is self.prefix_entry:
+                w.configure(state="normal" if enabled and self.v["use_topic_prefix"].get() else "disabled")
             else:
                 w.configure(state="normal" if enabled else "disabled")
+
+    def _show_prefix(self, prefix):
+        """Put the topic prefix in use into the topic headings."""
+        self.shown_prefix = prefix
+        self.metrics.set_heading(0, prefix + FRAME_TOPIC)
+        self.frame_section.set_title(tr("client.latest_frame", topic=prefix + FRAME_TOPIC))
+        self._set_rb_topic_label(prefix + RIGID_BODY_TOPIC)
 
     def _set_rb_topic_label(self, label):
         """Rigid bodies arrive on NatNet_RigidBody or on split topics, as the
@@ -270,6 +287,9 @@ class ClientApp:
         except ValueError:
             raise ValueError(tr("client.err_fps"))
         cfg["stats_window"] = parse_window(self.v["stats_window"].get())
+        cfg["use_topic_prefix"] = bool(self.v["use_topic_prefix"].get())
+        cfg["topic_prefix"] = self.v["topic_prefix"].get().strip()
+        cfg["prefix"] = parse_topic_prefix(cfg["use_topic_prefix"], cfg["topic_prefix"])
         return cfg
 
     def _update_cmdline(self):
@@ -281,6 +301,10 @@ class ClientApp:
                 args += ["--stats-window", self.v["stats_window"].get()]
         except ValueError:
             pass
+        if not self.v["use_topic_prefix"].get():
+            args.append("--no-topic-prefix")
+        elif self.v["topic_prefix"].get().strip() != DEFAULT_TOPIC_PREFIX:
+            args += ["--topic-prefix", self.v["topic_prefix"].get().strip()]
         self.cmdline.set(command_line("DDSTestClient.py", args))
 
     def _section(self, parent, key, title, padding):
@@ -309,10 +333,11 @@ class ClientApp:
         except ValueError as e:
             messagebox.showerror(tr("common.invalid_setting"), str(e), parent=self.root)
             return
-        merge_settings(SETTINGS_FILE, cfg)
+        merge_settings(SETTINGS_FILE, {k: v for k, v in cfg.items() if k in DEFAULTS})
         self.table.clear()
         self.frame_info.configure(text="—")
         self.metrics.clear()
+        self._show_prefix(cfg["prefix"])
         self.failures_shown = 0
         self.session = ClientSession(cfg)
         self._sync_buttons()
@@ -328,7 +353,7 @@ class ClientApp:
         with s.lock:
             m = s.monitor
             fresh = FlowMonitor(m.frame_reader, m.rb_reader,
-                                MockVerifier(s.cfg["mock_fps"]) if m.verifier else None,
+                                MockVerifier(s.cfg["mock_fps"], s.cfg["prefix"]) if m.verifier else None,
                                 s.cfg["stats_window"], m.split_readers)
             s.monitor = fresh
         self.failures_shown = 0

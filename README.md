@@ -173,6 +173,13 @@ python DDSTestClient.py --verify-mock
 | `<name>_pos` | `NatNet::RigidBodyPosition` | Split mode only, one topic per rigid body: its position, mean error and tracking flag, one sample per frame |
 | `<name>_orientation` | `NatNet::RigidBodyOrientation` | Split mode only, one topic per rigid body: its orientation quaternion and tracking flag, one sample per frame |
 
+**Topic prefix:** by default every topic name starts with `rt/basketball/`. The topics are actually named `rt/basketball/NatNet_FrameOfMocapData`, `rt/basketball/NatNet_RigidBody` and, in split mode, `rt/basketball/basketball_pos` and so on. The tables here show the names without the prefix.
+
+- To change the prefix, use `--topic-prefix TEXT`. To use the plain names, use `--no-topic-prefix`. In either window, use **Prefix topic names with**.
+- The prefix can contain letters, digits, `_` and `/`.
+- The test client has the same setting, with the same default. It must match the bridge, otherwise the client finds no publishers.
+- `rt/` is the prefix ROS 2 gives its topics on DDS. The prefix alone doesn't make these ROS 2 topics, though. A ROS 2 node also needs a message type with the same name and layout as the DDS type. These types are named `NatNet::…`, not ROS 2's `<package>::msg::dds_::<Type>_`.
+
 **Split mode:** start the bridge with `--split-rigid-bodies`, or choose **Publish rigid bodies → position and orientation separately** in the bridge window. Each rigid body's position and orientation are then published as separate objects, on two topics named after the rigid body, instead of on `NatNet_RigidBody`. For example, a rigid body named `basketball` is published on `basketball_pos` and `basketball_orientation`.
 
 - Every sample carries the rigid body's id, name, frame number and Motive timestamp. The position and orientation samples from one frame share the same frame number and DDS source timestamp, so a consumer can pair them up.

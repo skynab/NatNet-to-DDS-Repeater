@@ -23,10 +23,12 @@ from tkinter import messagebox, ttk
 from types import SimpleNamespace
 
 import NatNetToDDS as nn
-from natnet_dds import FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX, RIGID_BODY_TOPIC, create_backend
+from natnet_dds import (DEFAULT_TOPIC_PREFIX, FRAME_TOPIC, ORIENTATION_SUFFIX, POSITION_SUFFIX, RIGID_BODY_TOPIC,
+                        create_backend)
 from natnet_dds.gui_common import (BAD, IDLE, OK, WARN, LanguagePicker, Lamp, LogPane, MetricsPanel,
                                    RigidBodyTable, Section, command_line, labeled, local_ipv4_addresses,
-                                   merge_settings, parse_window, stats_texts)
+                                   merge_settings, parse_topic_prefix, parse_window, stats_texts,
+                                   topic_prefix_row)
 from natnet_dds.i18n import load_saved_language, tr
 from natnet_dds.metrics import DEFAULT_WINDOW_S, format_utc_ns
 
@@ -38,7 +40,7 @@ DEFAULTS = {
     "multicast_address": "239.255.42.99", "command_port": 1510, "data_port": 1511,
     "dds": "auto", "domain": 0, "reliable": False,
     "publish_frames": True, "publish_rigid_bodies": True, "split_rigid_bodies": False, "mock_fps": 120,
-    "stats_window": DEFAULT_WINDOW_S,
+    "stats_window": DEFAULT_WINDOW_S, "use_topic_prefix": True, "topic_prefix": DEFAULT_TOPIC_PREFIX,
 }
 SPLIT_POS = "<name>" + POSITION_SUFFIX
 SPLIT_ORIENTATION = "<name>" + ORIENTATION_SUFFIX
@@ -71,7 +73,8 @@ class BridgeSession:
             self.bridge = nn.NatNetToDDSBridge(self.backend, c["publish_frames"],
                                                c["publish_rigid_bodies"], c["reliable"],
                                                stats_window_s=c["stats_window"],
-                                               split_rigid_bodies=c["split_rigid_bodies"])
+                                               split_rigid_bodies=c["split_rigid_bodies"],
+                                               topic_prefix=c["prefix"])
             client, self._request_descriptions = nn.create_natnet_client(
                 self.bridge, c["server"], c["client"], c["multicast"], c["multicast_address"],
                 c["command_port"], c["data_port"])
@@ -194,6 +197,8 @@ class BridgeApp:
             "split_rigid_bodies": tk.BooleanVar(value=cfg["split_rigid_bodies"]),
             "mock_fps": tk.StringVar(value=str(cfg["mock_fps"])),
             "stats_window": tk.StringVar(value="%g" % cfg["stats_window"]),
+            "use_topic_prefix": tk.BooleanVar(value=cfg["use_topic_prefix"]),
+            "topic_prefix": tk.StringVar(value=cfg["topic_prefix"]),
         }
         self.cmdline = tk.StringVar()
         self._build()
@@ -256,28 +261,31 @@ class BridgeApp:
         w = labeled(df, 1, tr("common.domain_id"),
                     ttk.Spinbox(df, from_=0, to=232, textvariable=self.v["domain"], width=6))
         self.settings_widgets.append(w)
+        self.prefix_cb, self.prefix_entry = topic_prefix_row(
+            df, 2, self.v["use_topic_prefix"], self.v["topic_prefix"], on_toggle=self._on_prefix)
+        self.settings_widgets += [self.prefix_cb, self.prefix_entry]
         cb = ttk.Checkbutton(df, text=tr("bridge.publish_topic", topic=FRAME_TOPIC),
                              variable=self.v["publish_frames"])
-        cb.grid(row=2, column=0, columnspan=2, sticky="w", pady=1)
+        cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
         self.settings_widgets.append(cb)
         # Rigid bodies: one keyed topic, or position and orientation as
         # separate objects on topics named after each rigid body.
         cb = ttk.Checkbutton(df, text=tr("bridge.publish_rigid_bodies"),
                              variable=self.v["publish_rigid_bodies"], command=self._on_rigid_bodies)
-        cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
+        cb.grid(row=4, column=0, columnspan=2, sticky="w", pady=1)
         self.settings_widgets.append(cb)
         self.rb_mode_radios = []
         for i, (val, text) in enumerate((
                 (False, tr("bridge.rb_combined", topic=RIGID_BODY_TOPIC)),
                 (True, tr("bridge.rb_split", pos=SPLIT_POS, orientation=SPLIT_ORIENTATION)))):
             rb = ttk.Radiobutton(df, text=text, value=val, variable=self.v["split_rigid_bodies"])
-            rb.grid(row=4 + i, column=0, columnspan=2, sticky="w", padx=(22, 0))
+            rb.grid(row=5 + i, column=0, columnspan=2, sticky="w", padx=(22, 0))
             self.settings_widgets.append(rb)
             self.rb_mode_radios.append(rb)
         cb = ttk.Checkbutton(df, text=tr("bridge.reliable"), variable=self.v["reliable"])
-        cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=1)
+        cb.grid(row=7, column=0, columnspan=2, sticky="w", pady=1)
         self.settings_widgets.append(cb)
-        w = labeled(df, 7, tr("metrics.window"),
+        w = labeled(df, 8, tr("metrics.window"),
                     ttk.Spinbox(df, from_=1, to=3600, textvariable=self.v["stats_window"], width=6))
         self.settings_widgets.append(w)
 
@@ -376,6 +384,10 @@ class BridgeApp:
         self.mcast_entry.configure(state="normal" if self.v["multicast"].get() and not self.session
                                    else "disabled")
 
+    def _on_prefix(self):
+        enabled = self.v["use_topic_prefix"].get() and not self.session and not self._stopping
+        self.prefix_entry.configure(state="normal" if enabled else "disabled")
+
     def _on_rigid_bodies(self):
         enabled = self.v["publish_rigid_bodies"].get() and not self.session and not self._stopping
         for rb in self.rb_mode_radios:
@@ -408,6 +420,9 @@ class BridgeApp:
         if not (cfg["publish_frames"] or cfg["publish_rigid_bodies"]):
             raise ValueError(tr("bridge.err_no_topic"))
         cfg["stats_window"] = parse_window(self.v["stats_window"].get())
+        cfg["use_topic_prefix"] = bool(self.v["use_topic_prefix"].get())
+        cfg["topic_prefix"] = self.v["topic_prefix"].get().strip()
+        cfg["prefix"] = parse_topic_prefix(cfg["use_topic_prefix"], cfg["topic_prefix"])
         try:
             cfg["mock_fps"] = max(1, int(float(self.v["mock_fps"].get())))
         except ValueError:
@@ -415,7 +430,7 @@ class BridgeApp:
         return cfg
 
     def _save_settings(self, cfg):
-        merge_settings(SETTINGS_FILE, cfg)
+        merge_settings(SETTINGS_FILE, {k: v for k, v in cfg.items() if k in DEFAULTS})
 
     def _section(self, parent, key, title, padding):
         return Section(parent, title, key, expanded=key not in self.collapsed,
@@ -445,6 +460,10 @@ class BridgeApp:
             args.append("--no-rigid-bodies")
         elif g["split_rigid_bodies"].get():
             args.append("--split-rigid-bodies")
+        if not g["use_topic_prefix"].get():
+            args.append("--no-topic-prefix")
+        elif g["topic_prefix"].get().strip() != DEFAULT_TOPIC_PREFIX:
+            args += ["--topic-prefix", g["topic_prefix"].get().strip()]
         try:
             if float(g["stats_window"].get()) != DEFAULT_WINDOW_S:
                 args += ["--stats-window", g["stats_window"].get()]
@@ -464,6 +483,7 @@ class BridgeApp:
                 w.configure(state="normal" if enabled else "disabled")
         self._on_transport()
         self._on_rigid_bodies()
+        self._on_prefix()
 
     # -- actions ----------------------------------------------------------------
 
@@ -547,12 +567,12 @@ class BridgeApp:
 
         # 3. DDS publisher (created first)
         if s.backend and b:
-            topics = [FRAME_TOPIC] if c["publish_frames"] else []
+            topics = [b.frame_topic] if c["publish_frames"] else []
             if b.split_rigid_bodies:
-                topics.append(tr("bridge.dds_split_topics", pos=SPLIT_POS, orientation=SPLIT_ORIENTATION,
-                                 count=len(b.split_topics)))
+                topics.append(tr("bridge.dds_split_topics", pos=b.topic_prefix + SPLIT_POS,
+                                 orientation=b.topic_prefix + SPLIT_ORIENTATION, count=len(b.split_topics)))
             elif c["publish_rigid_bodies"]:
-                topics.append(RIGID_BODY_TOPIC)
+                topics.append(b.rigid_body_topic)
             self.lamp_dds.set(OK, tr("bridge.dds_ok", backend=s.backend.name, domain=c["domain"],
                                      topics="\n".join(topics)))
         elif s.state == "error" and not s.backend:
