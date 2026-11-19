@@ -207,6 +207,7 @@ Subscribe to the topic names above and the generated code works with this bridge
 - **Data descriptions:** the stock client only prints them. The subclass passes them to the bridge, which uses them for names.
 - **Per-frame printing:** the stock client prints a console line for every frame, which slows high frame rates. The subclass decodes frames without that print.
 - **No deep copies:** the SDK's `MoCapData` classes deep-copy every marker, rigid body and bone as it is stored, and copy whole marker sets a second time. The decoder never reuses those objects, so the bridge turns the copies off for `MoCapData`. Decoding is 3–4× faster as a result.
+- **Frames before the handshake:** a server that is already streaming sends frames before it has told the bridge which NatNet version it uses. The SDK would decode those frames with the wrong layout and produce garbage, such as a timestamp of -1 and no rigid bodies, so the bridge skips them.
 - **Receive buffer:** the bridge asks the OS for a 4 MB receive buffer on the NatNet data socket instead of the OS default. A short pause in the bridge then delays frames instead of dropping them. It logs the size it got, for example `[natnet] receive buffer 4096 KB`.
 - **Timing:** it records when each packet arrived and reads Motive's clock frequency (see [Metrics](#metrics)).
 

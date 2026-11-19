@@ -113,6 +113,8 @@ class BridgeNatNetClient(NatNetClient):
     * The arrival time of each packet is recorded (packet_received_ns) and
       the server's high-resolution clock frequency, which the stock client
       skips, is read from the server info (clock_frequency).
+    * Frames that arrive before the NatNet version handshake are skipped:
+      the SDK would decode them with the wrong layout.
     * The data socket gets a larger receive buffer (RECEIVE_BUFFER_BYTES), so
       short pauses in the bridge don't drop packets.
 
@@ -126,6 +128,7 @@ class BridgeNatNetClient(NatNetClient):
         self.packet_received_ns = None   # wall clock (ns since UNIX epoch) of the packet being processed
         self.clock_frequency = None      # Motive's high-res clock ticks per second
         self.receive_buffer_bytes = None  # data socket receive buffer granted by the OS
+        self.frames_before_handshake = 0  # frames skipped because the NatNet version wasn't known yet
 
     # Overrides NatNetClient.__process_message (name-mangled private method).
     # It runs on the SDK's receive thread right after recvfrom().
@@ -136,6 +139,13 @@ class BridgeNatNetClient(NatNetClient):
         major, minor = self.get_major(), self.get_minor()
 
         if message_id == self.NAT_FRAMEOFDATA:
+            if major == 0:
+                # The NatNet version isn't known until the server answers the
+                # connect request. A server that is already streaming sends
+                # frames before that, and decoding them with the wrong layout
+                # gives garbage (e.g. timestamp -1, no rigid bodies), so skip them.
+                self.frames_before_handshake += 1
+                return message_id
             # Invokes new_frame_with_data_listener with the decoded MoCapData.
             self._NatNetClient__unpack_mocap_data(data[4:], packet_size, major, minor)
             return message_id

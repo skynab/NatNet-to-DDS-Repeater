@@ -196,7 +196,7 @@ class FlowMonitor:
         self.rb_reader = rb_reader
         self.split_readers = split_readers
         self.split = False              # True while rigid bodies arrive on split topics
-        self._first_frame_time = None
+        self._unnamed_since = {}        # rigid body id -> time.monotonic() it was first seen without a name
         self.verifier = verifier
         self.frames = self.rb_samples = self.missed = self.out_of_order = 0
         self.last_frame_number = None
@@ -265,12 +265,14 @@ class FlowMonitor:
     def _add_split_names(self, f):
         """Subscribe to the split topics of the rigid bodies in a frame. A
         body without a name gets the bridge's "RigidBody_<id>" topics, but only
-        after a few seconds: names arrive shortly after the bridge connects."""
+        once it has gone without a name for a few seconds: names arrive shortly
+        after a bridge (re)connects to Motive."""
         now = time.monotonic()
-        if self._first_frame_time is None:
-            self._first_frame_time = now
         for rb in f.rigid_bodies:
-            if rb.name or now - self._first_frame_time > 3.0:
+            if rb.name:
+                self._unnamed_since.pop(rb.id, None)
+                self.split_readers.add(rb.name, rb.id)
+            elif now - self._unnamed_since.setdefault(rb.id, now) > 3.0:
                 self.split_readers.add(rb.name, rb.id)
 
     def _poll_split(self):
